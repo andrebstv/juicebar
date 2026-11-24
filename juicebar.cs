@@ -454,7 +454,11 @@ static class Hid
 // Pergunta e resposta pelas colecoes de fabricante (0xFF00/0xFF43); so leitura.
 class HidPP : IDisposable
 {
-    const byte SW = 0x0D;                         // "software id" nosso, para separar das respostas do G HUB
+    // "software id": um diferente a cada pergunta, para que a resposta atrasada de uma pergunta
+    // (aparelho acordando) nao seja tomada pela da seguinte (ja deu 87% = 'W' do nome no lugar da bateria).
+    // So ids livres: 07 OpenRGB, 0A LGSTrayEx, 0B Solaar, 0D G HUB, 0F firmware (lista do Solaar, base.py).
+    static readonly byte[] SWS = { 0x08, 0x09, 0x0C, 0x0E };
+    int swi;
     FileStream curto, longo;
     int outCurto, outLongo;
     readonly System.Collections.Concurrent.BlockingCollection<byte[]> fila = new System.Collections.Concurrent.BlockingCollection<byte[]>();
@@ -510,7 +514,8 @@ class HidPP : IDisposable
         var fs = usarLongo ? longo : curto;
         if (fs == null) return null;
         var b = new byte[usarLongo ? outLongo : outCurto];
-        b[0] = (byte)(usarLongo ? 0x11 : 0x10); b[1] = idx; b[2] = feat; b[3] = (byte)((func << 4) | SW);
+        byte sw = SWS[swi++ % SWS.Length];
+        b[0] = (byte)(usarLongo ? 0x11 : 0x10); b[1] = idx; b[2] = feat; b[3] = (byte)((func << 4) | sw);
         Array.Copy(p, 0, b, 4, Math.Min(p.Length, b.Length - 4));
         try { fs.Write(b, 0, b.Length); fs.Flush(); } catch { return null; }
         var fim = DateTime.Now.AddMilliseconds(ms);
@@ -559,7 +564,7 @@ class HidPP : IDisposable
                 foreach (var ch in t) { if (ch == 0 || sb.Length >= tam) break; sb.Append((char)ch); }
                 if (sb.Length == antes) break;
             }
-            i.Nome = sb.ToString().Trim();
+            i.Nome = sb.Length >= tam ? sb.ToString().Trim() : null;     // nome cortado (pergunta sem resposta): melhor nenhum
             var ti = Pedir(idx, (byte)fNome, 2, new byte[0], 400);
             if (ti != null) i.TipoLogi = ti[0];
         }
@@ -578,6 +583,40 @@ class HidPP : IDisposable
     {
         var r = Pedir(idx, 0x00, 0, new byte[] { (byte)(id >> 8), (byte)id, 0 }, 400);
         return r == null ? -1 : r[0];
+    }
+
+    // ---- registro 0x2B5 do receptor Unifying (HID++ 1.0, leitura de registro longo):
+    // sub 0x20+n-1 = pareamento (byte 7, 4 bits baixos = tipo), sub 0x40+n-1 = nome (byte 1 = tamanho).
+    // Serve para aparelho que nao tem a feature 0x0005 (ex.: teclado K270). Fonte: Solaar (receiver.py).
+    public byte[] Registro(byte sub, int ms)
+    {
+        if (curto == null) return null;
+        byte[] lixo;
+        while (fila.TryTake(out lixo)) { }
+        var b = new byte[outCurto];
+        b[0] = 0x10; b[1] = 0xFF; b[2] = 0x83; b[3] = 0xB5; b[4] = sub;
+        try { curto.Write(b, 0, b.Length); curto.Flush(); } catch { return null; }
+        var fim = DateTime.Now.AddMilliseconds(ms);
+        while (true)
+        {
+            int resta = (int)(fim - DateTime.Now).TotalMilliseconds;
+            if (resta <= 0) return null;
+            byte[] r;
+            if (!fila.TryTake(out r, resta)) return null;
+            if (r.Length < 6 || r[1] != 0xFF) continue;
+            if (r[0] == 0x10 && r[2] == 0x8F && r[3] == 0x83 && r[4] == 0xB5) return null;   // erro: registro/aparelho nao existe
+            if (r[0] == 0x11 && r[2] == 0x83 && r[3] == 0xB5 && r[4] == sub) { var s = new byte[r.Length - 4]; Array.Copy(r, 4, s, 0, s.Length); return s; }
+        }
+    }
+
+    // nome e tipo que o receptor guardou no pareamento (null/-1 se nao for Unifying)
+    public void Pareamento(byte idx, out string nome, out int tipo10)
+    {
+        nome = null; tipo10 = -1;
+        if (idx < 1 || idx > 6) return;
+        nome = Logi.NomeDoRegistro(Registro((byte)(0x40 + idx - 1), 400));
+        var p = Registro((byte)(0x20 + idx - 1), 400);
+        if (p != null && p.Length > 7) tipo10 = p[7] & 0x0F;
     }
 }
 
@@ -645,6 +684,85 @@ static class Razer
 
     [DllImport("hid.dll")] static extern bool HidD_SetFeature(SafeFileHandle h, byte[] b, int n);
     [DllImport("hid.dll")] static extern bool HidD_GetFeature(SafeFileHandle h, byte[] b, int n);
+}
+
+// ---- Compx (VID 3554): receptores 2.4 GHz de mouses Redragon, Kysona, Pulsar, ATK/VXE.
+// Relatorio 0x08 de 17 bytes na colecao de fabricante (interface 1): pedido por SET_REPORT
+// (HidD_SetOutputReport, o receptor so escuta transferencia de controle), resposta como input.
+// [0]=0x08 [1]=comando ... [16]=0x55 - soma(0..15). 0x03 status: [6]=1 mouse acordado.
+// 0x04 energia: [6]=%, [7]=1 cabo ligado, [8..9]=mV (big-endian). Fonte: Linux drivers/hid/hid-pulsar.c.
+static class Compx
+{
+    public const byte STATUS = 0x03, ENERGIA = 0x04;
+
+    public static byte[] Montar(byte cmd)
+    {
+        var p = new byte[17]; p[0] = 0x08; p[1] = cmd;
+        p[16] = Soma(p);
+        return p;
+    }
+
+    public static byte Soma(byte[] b) { int s = 0; for (int i = 0; i < 16; i++) s += b[i]; return (byte)(0x55 - s); }
+
+    public static bool Valida(byte[] r, byte cmd) { return r != null && r.Length >= 17 && r[0] == 0x08 && r[1] == cmd && r[16] == Soma(r); }
+
+    // resposta do 0x04 -> %, carregando, mV (cabo ligado e < 100% = carregando, como no Linux)
+    public static bool Decodificar(byte[] r, out int nivel, out bool carregando, out int mv)
+    {
+        nivel = -1; carregando = false; mv = 0;
+        if (!Valida(r, ENERGIA) || r[6] > 100 || r[7] > 1) return false;
+        nivel = r[6]; carregando = r[7] == 1 && r[6] < 100; mv = (r[8] << 8) | r[9];
+        return true;
+    }
+
+    // estado: "ok", "dormindo" (receptor respondeu que o mouse nao esta disponivel) ou "sem resposta"
+    public static bool Ler(Hid.Colecao c, out int nivel, out bool carregando, out int mv, out string estado)
+    {
+        nivel = -1; carregando = false; mv = 0; estado = "sem resposta";
+        var h = Hid.Abrir(c.Caminho, true, true);
+        if (h.IsInvalid) { h.Dispose(); estado = "não abriu"; return false; }
+        var fila = new System.Collections.Concurrent.BlockingCollection<byte[]>();
+        bool fechado = false;
+        using (var fs = new FileStream(h, FileAccess.ReadWrite, 1, true))
+        {
+            Action ler = null;
+            ler = () =>
+            {
+                var b = new byte[c.InLen];
+                try { fs.BeginRead(b, 0, b.Length, ar => { try { if (fs.EndRead(ar) > 0 && !fechado) { fila.Add(b); ler(); } } catch { } }, null); } catch { }
+            };
+            ler();
+            try
+            {
+                var st = Perguntar(h, fila, STATUS);
+                if (st == null) return false;
+                if (st[6] != 1) { estado = "dormindo"; return false; }
+                var r = Perguntar(h, fila, ENERGIA);
+                if (!Decodificar(r, out nivel, out carregando, out mv)) return false;
+                estado = "ok";
+                return true;
+            }
+            finally { fechado = true; }
+        }
+    }
+
+    static byte[] Perguntar(SafeFileHandle h, System.Collections.Concurrent.BlockingCollection<byte[]> fila, byte cmd)
+    {
+        byte[] lixo;
+        while (fila.TryTake(out lixo)) { }
+        var p = Montar(cmd);
+        if (!HidD_SetOutputReport(h, p, p.Length)) return null;
+        var fim = DateTime.Now.AddMilliseconds(300);
+        while (true)
+        {
+            int resta = (int)(fim - DateTime.Now).TotalMilliseconds;
+            byte[] r;
+            if (resta <= 0 || !fila.TryTake(out r, resta)) return null;
+            if (Valida(r, cmd)) return r;
+        }
+    }
+
+    [DllImport("hid.dll")] static extern bool HidD_SetOutputReport(SafeFileHandle h, byte[] b, int n);
 }
 
 // decodificacao das respostas de bateria (separada para poder testar com respostas gravadas)
@@ -717,6 +835,38 @@ static class Logi
         }
     }
 
+    // resposta do registro 0x2B5 sub 0x4N (sem o cabecalho): [sub, tamanho, nome...]
+    public static string NomeDoRegistro(byte[] r)
+    {
+        if (r == null || r.Length < 3 || r[1] == 0 || r[1] > r.Length - 2) return null;
+        var s = System.Text.Encoding.ASCII.GetString(r, 2, r[1]).Trim('\0', ' ');
+        return s.Length > 0 ? s : null;
+    }
+
+    // tipo do pareamento HID++ 1.0 (registro 0x2B5 sub 0x2N, byte 7 & 0x0F), tabela do Solaar
+    public static Tipo TipoDe10(int t)
+    {
+        switch (t)
+        {
+            case 0x01: case 0x03: return Tipo.Teclado;          // teclado, teclado numerico
+            case 0x02: case 0x08: case 0x09: return Tipo.Mouse;  // mouse, trackball, touchpad
+            case 0x0B: case 0x0C: return Tipo.Controle;          // gamepad, joystick
+            case 0x0D: return Tipo.Fone;
+            default: return Tipo.Outro;
+        }
+    }
+
+    public static string NomeDoTipo10(int t)
+    {
+        switch (t)
+        {
+            case 0x01: return "teclado"; case 0x02: return "mouse"; case 0x03: return "teclado numérico"; case 0x04: return "apresentador";
+            case 0x07: return "controle remoto"; case 0x08: return "trackball"; case 0x09: return "touchpad"; case 0x0A: return "mesa digitalizadora";
+            case 0x0B: return "gamepad"; case 0x0C: return "joystick"; case 0x0D: return "headset";
+            default: return t < 0 ? "?" : "tipo " + t;
+        }
+    }
+
     public static string NomeDoTipo(int t)
     {
         string[] n = { "teclado", "controle remoto", "teclado numérico", "mouse", "touchpad", "trackball", "apresentador", "receptor", "headset", "webcam", "volante", "joystick", "gamepad", "dock", "caixa de som", "microfone" };
@@ -750,6 +900,8 @@ static class Receptores
         var d = new System.Text.StringBuilder();
         List<Hid.Colecao> todas;
         try { todas = Hid.Listar(); } catch (Exception ex) { res.Diagnostico = "HID: erro ao listar: " + ex.Message; return res; }
+        var lidos = new HashSet<string>();
+        var semLeitura = new List<Tuple<string, string>>();
         foreach (var g in todas.Where(c => !c.Bluetooth).GroupBy(c => c.Pai, StringComparer.OrdinalIgnoreCase))
         {
             var cols = g.ToList();
@@ -785,10 +937,19 @@ static class Receptores
                         HidPP.Info i = null;
                         try { i = pp.Consultar(idx); } catch { }
                         if (i == null) continue;
-                        d.AppendLine(string.Format("   HID++ {0}: protocolo {1}.{2}, \"{3}\", {4}, bateria: {5}", idx == 0xFF ? "direto" : "aparelho " + idx, i.Versao / 10, i.Versao % 10, i.Nome, Logi.NomeDoTipo(i.TipoLogi),
+                        // sem nome/tipo pela feature 0x0005: pergunta ao receptor (pareamento Unifying)
+                        string nomeR = null; int tipoR = -1;
+                        if (idx != 0xFF && (string.IsNullOrEmpty(i.Nome) || i.TipoLogi < 0))
+                        {
+                            try { pp.Pareamento(idx, out nomeR, out tipoR); } catch { }
+                            if (string.IsNullOrEmpty(i.Nome) && nomeR != null) i.Nome = nomeR;
+                        }
+                        string tipoTxt = i.TipoLogi >= 0 ? Logi.NomeDoTipo(i.TipoLogi) : Logi.NomeDoTipo10(tipoR) + (tipoR >= 0 ? " (receptor)" : "");
+                        d.AppendLine(string.Format("   HID++ {0}: protocolo {1}.{2}, \"{3}\", {4}, bateria: {5}", idx == 0xFF ? "direto" : "aparelho " + idx, i.Versao / 10, i.Versao % 10, i.Nome, tipoTxt,
                             i.Nivel < 0 ? "não tem" : string.Format("{0}%{1} (feature {2:X4})", i.Nivel, i.Carregando ? " carregando" : "", i.FeatureBateria)));
                         if (i.Nivel < 0 || i.TipoLogi == 7) continue;
-                        var a = new Aparelho { Id = string.Format("logi:{0}:{1}", g.Key, idx), Nome = string.IsNullOrEmpty(i.Nome) ? "Aparelho Logitech" : "Logitech " + i.Nome, Tipo = Logi.TipoDe(i.TipoLogi), Fonte = "Logitech" };
+                        var tipo = i.TipoLogi >= 0 ? Logi.TipoDe(i.TipoLogi) : Logi.TipoDe10(tipoR);
+                        var a = new Aparelho { Id = string.Format("logi:{0}:{1}", g.Key, idx), Nome = string.IsNullOrEmpty(i.Nome) ? "Aparelho Logitech" : "Logitech " + i.Nome, Tipo = tipo, Fonte = "Logitech" };
                         if (a.Nome.StartsWith("Logitech Logitech")) a.Nome = a.Nome.Substring(9);
                         a.Valores.Add(new Valor { Rotulo = "", Nivel = i.Nivel, Carregando = i.Carregando });
                         res.Aparelhos.Add(a); lido = true;
@@ -812,12 +973,33 @@ static class Receptores
                 }
             }
 
-            if (!lido && SEM_FIO.IsMatch(produto + " " + fab))
+            // 4. Compx (Redragon, Kysona, Pulsar...)
+            if (!lido && c0.Vid == 0x3554)
             {
-                res.SemLeitura.Add(string.Format("{0} ({1:X4}:{2:X4})", (fab + " " + produto).Trim(), c0.Vid, c0.Pid));
+                foreach (var c in cols.Where(x => x.InLen == 17 && x.OutLen == 17 && x.UsagePage >= 0xFF00))
+                {
+                    int n, mv; bool carr; string estado; bool ok = false;
+                    try { ok = Compx.Ler(c, out n, out carr, out mv, out estado); } catch (Exception ex) { n = -1; carr = false; mv = 0; estado = "erro: " + ex.Message; }
+                    d.AppendLine(string.Format("   Compx {0:X4}/{1:X4}: {2}", c.UsagePage, c.Usage,
+                        ok ? string.Format("{0}%{1} ({2} mV)", n, carr ? " carregando" : "", mv) : estado == "dormindo" ? "mouse dormindo ou desligado" : estado));
+                    if (!ok) { if (estado == "dormindo") lido = true; continue; }   // dormindo: nao vai para "sem leitura"
+                    var a = new Aparelho { Id = "compx:" + g.Key, Nome = string.IsNullOrEmpty(produto) || SEM_FIO.IsMatch(produto) ? "Mouse 2.4 GHz" : produto, Tipo = TipoPelaColecao(cols), Fonte = "Compx" };
+                    if (a.Tipo == Tipo.Outro) a.Tipo = Tipo.Mouse;
+                    a.Valores.Add(new Valor { Rotulo = "", Nivel = n, Carregando = carr });
+                    res.Aparelhos.Add(a); lido = true; break;
+                }
+            }
+
+            string vp = string.Format("{0:X4}:{1:X4}", c0.Vid, c0.Pid);
+            if (lido) lidos.Add(vp);
+            else if (SEM_FIO.IsMatch(produto + " " + fab))
+            {
+                semLeitura.Add(Tuple.Create(vp, string.Format("{0} ({1})", (fab + " " + produto).Trim(), vp)));
                 d.AppendLine("   sem fio, sem leitura ainda");
             }
         }
+        // o receptor aparece como varias interfaces USB; se uma foi lida, as outras nao contam como "sem leitura"
+        res.SemLeitura.AddRange(semLeitura.Where(t => !lidos.Contains(t.Item1)).Select(t => t.Item2).Distinct());
         res.Diagnostico = d.ToString();
         return res;
     }
@@ -1690,6 +1872,25 @@ static class Testes
         Conferir("Razer resposta 0xB3 = 70%", 70, Razer.PorcentoDe(Razer.Valor(rr, 0x07, 0x80)));
         rr[1] = 0x05;
         Conferir("Razer comando não suportado", -1, Razer.Valor(rr, 0x07, 0x80));
+
+        // Compx: pedidos conferidos com o receptor 3554:F5D5 real (Redragon M916 Pro)
+        Conferir("Compx pedido status", "08-03-00-00-00-00-00-00-00-00-00-00-00-00-00-00-4A", BitConverter.ToString(Compx.Montar(Compx.STATUS)));
+        Conferir("Compx pedido energia: checksum", (byte)0x49, Compx.Montar(Compx.ENERGIA)[16]);
+        var cxs = new byte[] { 0x08, 0x03, 0, 0, 0, 0x01, 0x00, 0xA0, 0x1C, 0xEB, 0, 0, 0, 0, 0, 0, 0xA2 };   // resposta real, mouse dormindo
+        Conferir("Compx resposta real do status valida", true, Compx.Valida(cxs, Compx.STATUS));
+        Conferir("Compx status: dormindo", 0, (int)cxs[6]);
+        var cxe = new byte[17]; cxe[0] = 0x08; cxe[1] = 0x04; cxe[6] = 76; cxe[7] = 0; cxe[8] = 0x0F; cxe[9] = 0x3C; cxe[16] = Compx.Soma(cxe);
+        int cn, cmv; bool cc;
+        Conferir("Compx energia 76% 3900 mV", "76|False|3900", Compx.Decodificar(cxe, out cn, out cc, out cmv) ? cn + "|" + cc + "|" + cmv : "sem leitura");
+        cxe[7] = 1; cxe[16] = Compx.Soma(cxe);
+        Conferir("Compx energia no cabo = carregando", "76|True", Compx.Decodificar(cxe, out cn, out cc, out cmv) ? cn + "|" + cc : "sem leitura");
+        cxe[16] ^= 0xFF;
+        Conferir("Compx checksum errado recusado", false, Compx.Decodificar(cxe, out cn, out cc, out cmv));
+
+        // Logitech Unifying: registro 0x2B5, respostas reais do receptor C52B (K270 no espaco 2)
+        Conferir("Unifying nome K270", "K270", Logi.NomeDoRegistro(new byte[] { 0x41, 0x04, 0x4B, 0x32, 0x37, 0x30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }));
+        Conferir("Unifying tipo 1 = teclado", Tipo.Teclado, Logi.TipoDe10(new byte[] { 0x21, 0x08, 0x14, 0x40, 0x03, 0x04, 0x00, 0x01 }[7] & 0x0F));
+        Conferir("Unifying tipo 2 = mouse", Tipo.Mouse, Logi.TipoDe10(0x02));
 
         // padrao USB: valor bruto -> %
         Conferir("HID 0-255 valor 128", 50, Hid.Escala(128, 0, 255, false));

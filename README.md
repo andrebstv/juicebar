@@ -62,7 +62,10 @@ O `juicebar.ico` é gerado pelo `tools\gerar-icone.ps1` (cada tamanho desenhado 
 4. **USB e receptores 2.4 GHz** (a cada 1 min). No 2.4 GHz não existe um padrão único: cada marca passa a bateria pelo receptor do seu jeito. O Juicebar tenta, em ordem:
    - o **padrão USB de bateria** (HID, Battery Strength), que vale para qualquer marca que o siga;
    - **Logitech** (Lightspeed, Unifying, Bolt e aparelhos Logitech por cabo), pelo protocolo HID++, inclusive com o G HUB aberto;
-   - **Razer** (receptores HyperSpeed e aparelhos sem fio da marca), pelo protocolo de relatórios da Razer.
+   - **Razer** (receptores HyperSpeed e aparelhos sem fio da marca), pelo protocolo de relatórios da Razer;
+   - **Compx** (receptores VID 3554, como os dos mouses Redragon K1NG M916 Pro, Kysona, Pulsar e ATK/VXE), pelo mesmo protocolo do driver `hid-pulsar` do Linux. Mouse dormindo não responde: fica a última leitura por 5 min.
+
+   No Logitech Unifying, aparelho que não informa o próprio nome (ex.: teclado K270) aparece com o nome e o tipo que o receptor guardou no pareamento.
 
 Tudo é só leitura: o programa não conecta, não pareia e não grava nada no aparelho. Nos receptores ele só faz perguntas de leitura (versão, nome, bateria).
 
@@ -73,7 +76,7 @@ Tudo é só leitura: o programa não conecta, não pareia e não grava nada no a
 
 ## Testes
 
-`juicebar.exe --testar arquivo.txt` confere a leitura de cada protocolo com respostas montadas byte a byte pela documentação (Logitech, Razer, padrão USB, Fast Pair) e a comparação de versões. O código de saída é o número de falhas.
+`juicebar.exe --testar arquivo.txt` confere a leitura de cada protocolo com respostas montadas byte a byte pela documentação (Logitech, Razer, Compx, padrão USB, Fast Pair) e a comparação de versões. O código de saída é o número de falhas.
 
 `juicebar.exe --diagnostico arquivo.txt` grava o diagnóstico dos aparelhos USB e sai.
 
