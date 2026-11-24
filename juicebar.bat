@@ -1,10 +1,10 @@
 @echo off
-rem Abre o "Bateria dos aparelhos" na barra de tarefas. Na primeira vez (ou se o .cs mudar) compila
-rem o bateria-dos-aparelhos.exe em %LOCALAPPDATA%\BateriaDosAparelhos com o compilador do Windows.
+rem Abre o Juicebar na barra de tarefas. Na primeira vez (ou se o .cs mudar) compila
+rem o juicebar.exe em %LOCALAPPDATA%\Juicebar com o compilador do Windows.
 setlocal
-set "SRC=%~dp0bateria-dos-aparelhos.cs"
-set "OUT=%LOCALAPPDATA%\BateriaDosAparelhos"
-set "EXE=%OUT%\bateria-dos-aparelhos.exe"
+set "SRC=%~dp0juicebar.cs"
+set "OUT=%LOCALAPPDATA%\Juicebar"
+set "EXE=%OUT%\juicebar.exe"
 if not exist "%OUT%" mkdir "%OUT%"
 
 set "PRECISA="

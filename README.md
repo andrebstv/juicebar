@@ -1,6 +1,8 @@
-# Bateria dos aparelhos
+# Juicebar
 
-Mostra na barra de tarefas do Windows a bateria dos aparelhos sem fio conectados ao PC: fone, mouse, teclado, controle.
+A bateria dos seus aparelhos sem fio direto na barra de tarefas do Windows: fone, mouse, teclado, controle.
+
+![Juicebar na barra de tarefas: fone com cada lado separado, mouse e teclado](docs/barra.png)
 
 Fones com Fast Pair do Google (por exemplo, vários modelos da JBL) aparecem com cada lado separado, E (esquerdo) e D (direito). O Windows e a maioria dos programas só mostram um número para o fone inteiro.
 
@@ -9,28 +11,30 @@ Não precisa instalar nada: o programa é compilado com o compilador de C# que j
 ## Como usar
 
 1. Baixe ou clone o repositório.
-2. Clique duas vezes em `bateria-dos-aparelhos.bat`. Na primeira vez ele compila o programa em `%LOCALAPPDATA%\BateriaDosAparelhos` e depois abre. Se o `.cs` mudar, ele compila de novo.
+2. Clique duas vezes em `juicebar.bat`. Na primeira vez ele compila o programa em `%LOCALAPPDATA%\Juicebar` e depois abre. Se o `.cs` mudar, ele compila de novo.
 
 Na barra, à esquerda do clima e da área de notificação:
 
-- cada aparelho tem um ícone (fone, mouse, teclado, controle) e uma pilha com a porcentagem;
-- cores: branco acima de 40%, laranja até 40%, vermelho até 20%, verde carregando;
+- cada aparelho conectado tem o seu ícone (fone, mouse, teclado, controle) e uma pilha com a porcentagem, um ao lado do outro;
+- cores: branco acima de 40%, laranja até 40%, vermelho até 20%, verde carregando; o ícone pega a cor do nível mais baixo do aparelho;
 - passar o mouse mostra todos os aparelhos, cada lado do fone, o estojo e a hora da leitura;
 - clique esquerdo abre a janela de detalhes; clique direito tem Detalhes e Sair;
 - sem nenhum aparelho com bateria conectado, fica só um ícone de Bluetooth apagado.
+
+Para ver o visual sem aparelho nenhum: `juicebar.bat --demo` (fone, mouse e teclado de exemplo, como na imagem acima).
 
 ### Abrir com o Windows
 
 Depois de abrir uma vez pelo `.bat`, rode no PowerShell:
 
 ```powershell
-Set-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run -Name BateriaDosAparelhos -Value "`"$env:LOCALAPPDATA\BateriaDosAparelhos\bateria-dos-aparelhos.exe`""
+Set-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run -Name Juicebar -Value "`"$env:LOCALAPPDATA\Juicebar\juicebar.exe`""
 ```
 
 Para tirar:
 
 ```powershell
-Remove-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run -Name BateriaDosAparelhos
+Remove-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run -Name Juicebar
 ```
 
 ## De onde vem a bateria
@@ -53,3 +57,7 @@ O programa cria uma janela filha da barra de tarefas (`Shell_TrayWnd`), desenhad
 ## Requisitos
 
 Windows 10 ou 11, com Bluetooth e .NET Framework 4.x (já vem no Windows).
+
+## Licença
+
+[MIT](LICENSE)

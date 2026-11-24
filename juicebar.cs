@@ -1,4 +1,4 @@
-// Bateria dos aparelhos sem fio, na barra de tarefas.
+// Juicebar: bateria dos aparelhos sem fio, na barra de tarefas do Windows.
 //
 // Fontes (todas so de leitura: nao conecta, nao pareia, nao grava nada):
 //  1. Windows: a bateria que o Windows ja recebe de qualquer aparelho Bluetooth conectado
@@ -8,7 +8,7 @@
 //  3. Fast Pair do Google: fones que anunciam a bateria de cada lado (esquerdo, direito,
 //     estojo). So vale para fone conectado a este PC (casado pelo nome).
 //
-// Uso: bateria-dos-aparelhos.exe
+// Uso: juicebar.exe [--demo]
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -273,8 +273,27 @@ class Coletor
         fp.Mudou += () => Postar(Montar);
     }
 
+    // --demo: aparelhos de exemplo, sem ler nada (para ver o visual e tirar a foto do README)
+    public static bool Demo;
+
+    void MontarDemo()
+    {
+        var fone = new Aparelho { Id = "demo-fone", Nome = "Fone Bluetooth", Tipo = Tipo.Fone, Fonte = "Fast Pair" };
+        fone.Valores.Add(new Valor { Rotulo = "E", Nivel = 90 });
+        fone.Valores.Add(new Valor { Rotulo = "D", Nivel = 35 });
+        fone.Valores.Add(new Valor { Rotulo = "Estojo", Nivel = 60, Carregando = true, NaBarra = false });
+        var mouse = new Aparelho { Id = "demo-mouse", Nome = "Mouse Bluetooth", Tipo = Tipo.Mouse, Fonte = "Windows" };
+        mouse.Valores.Add(new Valor { Rotulo = "", Nivel = 72 });
+        var teclado = new Aparelho { Id = "demo-teclado", Nome = "Teclado Bluetooth", Tipo = Tipo.Teclado, Fonte = "Windows" };
+        teclado.Valores.Add(new Valor { Rotulo = "", Nivel = 15 });
+        Aparelhos = new List<Aparelho> { fone, mouse, teclado };
+        Atualizado = DateTime.Now;
+        if (Mudou != null) Mudou();
+    }
+
     public string Iniciar()
     {
+        if (Demo) { Postar(MontarDemo); return null; }
         var erro = fp.Iniciar();
         var t = new Thread(Laco) { IsBackground = true, Name = "coletor" };
         t.Start();
@@ -421,7 +440,7 @@ class Widget : Form
         StartPosition = FormStartPosition.Manual;
         Location = new Point(-3000, -3000);
         Size = new Size(10, 40);
-        Text = "Bateria dos aparelhos (barra)";
+        Text = "Juicebar (barra)";
         col = new Coletor(this);
         detalhes = new Detalhes(col);
         col.Mudou += () => { Encaixar(); Desenhar(); AtualizarDica(); };
@@ -466,7 +485,7 @@ class Widget : Form
     }
 
     // largura de cada aparelho na barra
-    static int LarguraDe(Aparelho a) { return a.Valores.Count(v => v.NaBarra) > 1 ? 88 : 66; }
+    static int LarguraDe(Aparelho a) { return a.Valores.Count(v => v.NaBarra) > 1 ? 94 : 72; }   // inclui 6 px de folga entre aparelhos
 
     int LarguraTotal()
     {
@@ -644,7 +663,7 @@ class Detalhes : Form
     public Detalhes(Coletor col)
     {
         this.col = col;
-        Text = "Bateria dos aparelhos";
+        Text = "Juicebar";
         Font = new Font("Segoe UI", 10f);
         BackColor = Color.FromArgb(32, 32, 32);
         ForeColor = Color.White;
@@ -765,9 +784,10 @@ static class Programa
     static void Main(string[] args)
     {
         bool novo;
-        using (var m = new Mutex(true, "BateriaDosAparelhos", out novo))
+        using (var m = new Mutex(true, "Juicebar", out novo))
         {
             if (!novo) return;
+            Coletor.Demo = args.Any(a => a.Equals("--demo", StringComparison.OrdinalIgnoreCase));
             N.SetProcessDPIAware();
             Application.EnableVisualStyles();
             var w = new Widget();
