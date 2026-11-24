@@ -7,10 +7,19 @@
 //     padrao de bateria (0x180F / 0x2A19).
 //  3. Fast Pair do Google: fones que anunciam a bateria de cada lado (esquerdo, direito,
 //     estojo). So vale para fone conectado a este PC (casado pelo nome).
+//  4. USB e receptores 2.4 GHz: o padrao USB de bateria (HID) de qualquer marca e o protocolo
+//     HID++ da Logitech (Lightspeed, Unifying, Bolt). Receptor sem fio que ainda nao sabemos
+//     ler aparece em "Sem leitura ainda" e no diagnostico.
 //
-// Uso: juicebar.exe [--demo]
+// Atualizacoes: procura versao nova nos releases do GitHub; com versao nova, ponto amarelo na barra.
+//
+// Uso: juicebar.exe [--demo] [--testar arq] [--diagnostico arq] [--versao X]
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Net;
+using Microsoft.Win32.SafeHandles;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Text;
@@ -28,9 +37,9 @@ using Windows.Storage.Streams;
 [assembly: System.Reflection.AssemblyProduct("Juicebar")]
 [assembly: System.Reflection.AssemblyDescription("Bateria dos aparelhos sem fio na barra de tarefas")]
 [assembly: System.Reflection.AssemblyCopyright("Copyright (c) 2026 caiquebmaso - MIT")]
-[assembly: System.Reflection.AssemblyVersion("1.0.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersion("1.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.1.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.1.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersion("1.1.0-beta")]
 
 // ================================================================ modelo
 enum Tipo { Fone, Mouse, Teclado, Controle, Outro }
@@ -49,6 +58,7 @@ class Aparelho
     public Tipo Tipo;
     public List<Valor> Valores = new List<Valor>();
     public string Fonte;
+    public DateTime Visto;
     public int Menor { get { var v = Valores.Where(x => x.NaBarra && x.Nivel >= 0).Select(x => x.Nivel).ToList(); return v.Count == 0 ? -1 : v.Min(); } }
 }
 
@@ -235,7 +245,7 @@ class FastPair
 
     // 2C FE | flags | campos [cabecalho = tamanho<<4 | tipo]; tipo 3/4 = bateria E, D, estojo.
     // Cada byte: bit 7 = carregando; bits 0-6 = nivel (0x7F = desconhecido).
-    static byte[] Decodificar(byte[] b)
+    public static byte[] Decodificar(byte[] b)
     {
         if (b.Length == 5) return null;
         int i = 3;
@@ -263,6 +273,565 @@ class FastPair
     }
 }
 
+// ================================================================ fonte 4: receptores USB / 2.4 GHz (HID)
+// Cada colecao HID que o Windows mostra (um aparelho USB tem varias). Bluetooth fica de fora:
+// esses ja vem pela fonte 1.
+static class Hid
+{
+    public class Colecao
+    {
+        public string Caminho, Pai, Produto, Fabricante;
+        public ushort Vid, Pid, UsagePage, Usage, InLen, OutLen, FeatLen;
+        public bool Bluetooth;
+    }
+
+    public static List<Colecao> Listar()
+    {
+        var r = new List<Colecao>();
+        Guid g; HidD_GetHidGuid(out g);
+        IntPtr h = SetupDiGetClassDevsW(ref g, null, IntPtr.Zero, 0x12);    // PRESENT | DEVICEINTERFACE
+        if (h == new IntPtr(-1)) return r;
+        try
+        {
+            var ifd = new SP_DEVICE_INTERFACE_DATA(); ifd.cbSize = (uint)Marshal.SizeOf(typeof(SP_DEVICE_INTERFACE_DATA));
+            for (uint i = 0; SetupDiEnumDeviceInterfaces(h, IntPtr.Zero, ref g, i, ref ifd); i++)
+            {
+                var dd = new SP_DEVINFO_DATA(); dd.cbSize = (uint)Marshal.SizeOf(typeof(SP_DEVINFO_DATA));
+                uint req;
+                SetupDiGetDeviceInterfaceDetailW(h, ref ifd, IntPtr.Zero, 0, out req, ref dd);
+                if (req == 0) continue;
+                IntPtr buf = Marshal.AllocHGlobal((int)req);
+                try
+                {
+                    Marshal.WriteInt32(buf, IntPtr.Size == 8 ? 8 : 6);
+                    if (!SetupDiGetDeviceInterfaceDetailW(h, ref ifd, buf, req, out req, ref dd)) continue;
+                    var c = new Colecao { Caminho = Marshal.PtrToStringUni(new IntPtr(buf.ToInt64() + 4)) };
+                    uint pai; var sb = new System.Text.StringBuilder(512);
+                    if (CM_Get_Parent(out pai, dd.DevInst, 0) == 0 && CM_Get_Device_IDW(pai, sb, 512, 0) == 0) c.Pai = sb.ToString();
+                    else c.Pai = c.Caminho;
+                    string cam = c.Caminho.ToUpperInvariant(), p = c.Pai.ToUpperInvariant();
+                    c.Bluetooth = cam.Contains("{00001124") || cam.Contains("{00001812") || p.StartsWith("BTH");
+                    using (var fh = Abrir(c.Caminho, false))
+                    {
+                        if (fh.IsInvalid) continue;
+                        var at = new HIDD_ATTRIBUTES(); at.Size = Marshal.SizeOf(typeof(HIDD_ATTRIBUTES));
+                        if (HidD_GetAttributes(fh, ref at)) { c.Vid = at.VendorID; c.Pid = at.ProductID; }
+                        IntPtr pp;
+                        if (HidD_GetPreparsedData(fh, out pp))
+                        {
+                            try
+                            {
+                                HIDP_CAPS caps;
+                                if (HidP_GetCaps(pp, out caps) == OK)
+                                {
+                                    c.UsagePage = caps.UsagePage; c.Usage = caps.Usage;
+                                    c.InLen = caps.InputReportByteLength; c.OutLen = caps.OutputReportByteLength; c.FeatLen = caps.FeatureReportByteLength;
+                                }
+                            }
+                            finally { HidD_FreePreparsedData(pp); }
+                        }
+                        c.Produto = Texto(fh, true); c.Fabricante = Texto(fh, false);
+                    }
+                    r.Add(c);
+                }
+                finally { Marshal.FreeHGlobal(buf); }
+            }
+        }
+        finally { SetupDiDestroyDeviceInfoList(h); }
+        return r;
+    }
+
+    static string Texto(SafeFileHandle fh, bool produto)
+    {
+        var b = new byte[256];
+        bool ok = produto ? HidD_GetProductString(fh, b, b.Length) : HidD_GetManufacturerString(fh, b, b.Length);
+        if (!ok) return "";
+        var s = System.Text.Encoding.Unicode.GetString(b);
+        int z = s.IndexOf('\0'); return (z >= 0 ? s.Substring(0, z) : s).Trim();
+    }
+
+    // leitura e escrita (rw) ou so consulta (atributos, textos)
+    public static SafeFileHandle Abrir(string caminho, bool rw, bool assincrono = false)
+    {
+        return CreateFileW(caminho, rw ? 0xC0000000u : 0u, 3, IntPtr.Zero, 3, assincrono ? 0x40000000u : 0u, IntPtr.Zero);
+    }
+
+    // ---- padrao USB de bateria: Battery Strength (0x06/0x20) ou AbsoluteStateOfCharge (0x85/0x65)
+    public static int BateriaPadrao(Colecao c, out string como)
+    {
+        como = null;
+        using (var fh = Abrir(c.Caminho, true))
+        using (var f0 = fh.IsInvalid ? Abrir(c.Caminho, false) : null)
+        {
+            var uso = fh.IsInvalid ? f0 : fh;
+            if (uso.IsInvalid) return -1;
+            IntPtr pp;
+            if (!HidD_GetPreparsedData(uso, out pp)) return -1;
+            try
+            {
+                HIDP_CAPS caps;
+                if (HidP_GetCaps(pp, out caps) != OK) return -1;
+                foreach (int tipo in new[] { 2, 0 })            // 2 = feature, 0 = input
+                {
+                    ushort n = tipo == 2 ? caps.NumberFeatureValueCaps : caps.NumberInputValueCaps;
+                    if (n == 0) continue;
+                    var vc = new byte[72 * n];
+                    if (HidP_GetValueCaps(tipo, vc, ref n, pp) != OK) continue;
+                    for (int k = 0; k < n; k++)
+                    {
+                        int o = k * 72;
+                        ushort up = BitConverter.ToUInt16(vc, o);
+                        byte rid = vc[o + 2];
+                        ushort link = BitConverter.ToUInt16(vc, o + 6);
+                        bool faixa = vc[o + 16] != 0;
+                        int lmin = BitConverter.ToInt32(vc, o + 40), lmax = BitConverter.ToInt32(vc, o + 44);
+                        ushort u0 = BitConverter.ToUInt16(vc, o + 56), u1 = faixa ? BitConverter.ToUInt16(vc, o + 58) : u0;
+                        ushort alvo = 0;
+                        if (up == 0x06 && 0x20 >= u0 && 0x20 <= u1) alvo = 0x20;
+                        else if (up == 0x85 && 0x65 >= u0 && 0x65 <= u1) alvo = 0x65;
+                        if (alvo == 0) continue;
+                        int len = tipo == 2 ? caps.FeatureReportByteLength : caps.InputReportByteLength;
+                        if (len == 0) continue;
+                        var rep = new byte[len]; rep[0] = rid;
+                        bool lido = tipo == 2 ? HidD_GetFeature(uso, rep, len) : HidD_GetInputReport(uso, rep, len);
+                        if (!lido) continue;
+                        uint val;
+                        if (HidP_GetUsageValue(tipo, up, link, alvo, out val, pp, rep, (uint)len) != OK) continue;
+                        int pct = Escala((int)val, lmin, lmax, up == 0x85);
+                        if (pct < 0) continue;
+                        como = string.Format("{0} {1:X2}/{2:X2} relatório {3}", tipo == 2 ? "feature" : "input", up, alvo, rid);
+                        return pct;
+                    }
+                }
+            }
+            finally { HidD_FreePreparsedData(pp); }
+        }
+        return -1;
+    }
+
+    // valor bruto -> 0-100 pela faixa logica do descritor (0x85/0x65 ja vem em %)
+    public static int Escala(int val, int lmin, int lmax, bool jaEmPorcento)
+    {
+        if (jaEmPorcento || lmax <= lmin) return val >= 0 && val <= 100 ? val : -1;
+        if (val < lmin || val > lmax) return -1;
+        return (int)Math.Round((val - lmin) * 100.0 / (lmax - lmin));
+    }
+
+    public const int OK = 0x00110000;
+
+    [StructLayout(LayoutKind.Sequential)] struct SP_DEVINFO_DATA { public uint cbSize; public Guid ClassGuid; public uint DevInst; public IntPtr Reserved; }
+    [StructLayout(LayoutKind.Sequential)] struct SP_DEVICE_INTERFACE_DATA { public uint cbSize; public Guid InterfaceClassGuid; public uint Flags; public IntPtr Reserved; }
+    [StructLayout(LayoutKind.Sequential)] struct HIDD_ATTRIBUTES { public int Size; public ushort VendorID, ProductID, VersionNumber; }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct HIDP_CAPS
+    {
+        public ushort Usage, UsagePage, InputReportByteLength, OutputReportByteLength, FeatureReportByteLength;
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 17)] public ushort[] Reserved;
+        public ushort NumberLinkCollectionNodes, NumberInputButtonCaps, NumberInputValueCaps, NumberInputDataIndices,
+            NumberOutputButtonCaps, NumberOutputValueCaps, NumberOutputDataIndices, NumberFeatureButtonCaps, NumberFeatureValueCaps, NumberFeatureDataIndices;
+    }
+    [DllImport("hid.dll")] static extern void HidD_GetHidGuid(out Guid g);
+    [DllImport("hid.dll")] static extern bool HidD_GetAttributes(SafeFileHandle h, ref HIDD_ATTRIBUTES a);
+    [DllImport("hid.dll")] static extern bool HidD_GetPreparsedData(SafeFileHandle h, out IntPtr pp);
+    [DllImport("hid.dll")] static extern bool HidD_FreePreparsedData(IntPtr pp);
+    [DllImport("hid.dll")] static extern int HidP_GetCaps(IntPtr pp, out HIDP_CAPS c);
+    [DllImport("hid.dll")] static extern int HidP_GetValueCaps(int tipo, byte[] caps, ref ushort n, IntPtr pp);
+    [DllImport("hid.dll")] static extern int HidP_GetUsageValue(int tipo, ushort up, ushort link, ushort uso, out uint val, IntPtr pp, byte[] rep, uint len);
+    [DllImport("hid.dll")] static extern bool HidD_GetFeature(SafeFileHandle h, byte[] b, int n);
+    [DllImport("hid.dll")] static extern bool HidD_GetInputReport(SafeFileHandle h, byte[] b, int n);
+    [DllImport("hid.dll")] static extern bool HidD_GetProductString(SafeFileHandle h, byte[] b, int n);
+    [DllImport("hid.dll")] static extern bool HidD_GetManufacturerString(SafeFileHandle h, byte[] b, int n);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern SafeFileHandle CreateFileW(string p, uint acc, uint share, IntPtr sec, uint disp, uint flags, IntPtr tpl);
+    [DllImport("setupapi.dll")] static extern IntPtr SetupDiGetClassDevsW(ref Guid cls, string en, IntPtr hwnd, uint flags);
+    [DllImport("setupapi.dll")] static extern bool SetupDiEnumDeviceInterfaces(IntPtr h, IntPtr di, ref Guid g, uint i, ref SP_DEVICE_INTERFACE_DATA d);
+    [DllImport("setupapi.dll", CharSet = CharSet.Unicode)] static extern bool SetupDiGetDeviceInterfaceDetailW(IntPtr h, ref SP_DEVICE_INTERFACE_DATA d, IntPtr det, uint n, out uint req, ref SP_DEVINFO_DATA dd);
+    [DllImport("setupapi.dll")] static extern bool SetupDiDestroyDeviceInfoList(IntPtr h);
+    [DllImport("cfgmgr32.dll")] static extern int CM_Get_Parent(out uint pai, uint dev, uint flags);
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)] static extern int CM_Get_Device_IDW(uint dev, System.Text.StringBuilder s, int n, uint flags);
+}
+
+// ---- Logitech HID++ (receptores Lightspeed, Unifying e Bolt, e aparelhos Logitech por USB).
+// Pergunta e resposta pelas colecoes de fabricante (0xFF00/0xFF43); so leitura.
+class HidPP : IDisposable
+{
+    const byte SW = 0x0D;                         // "software id" nosso, para separar das respostas do G HUB
+    FileStream curto, longo;
+    int outCurto, outLongo;
+    readonly System.Collections.Concurrent.BlockingCollection<byte[]> fila = new System.Collections.Concurrent.BlockingCollection<byte[]>();
+    volatile bool fechado;
+
+    public static HidPP Abrir(IEnumerable<Hid.Colecao> grupo)
+    {
+        var x = new HidPP();
+        foreach (var c in grupo.Where(c => c.UsagePage == 0xFF00 || c.UsagePage == 0xFF43))
+        {
+            if (c.OutLen == 7 && x.curto == null) { x.curto = x.Ligar(c, out x.outCurto); }
+            else if (c.OutLen == 20 && x.longo == null) { x.longo = x.Ligar(c, out x.outLongo); }
+        }
+        if (x.curto == null && x.longo == null) { x.Dispose(); return null; }
+        return x;
+    }
+
+    FileStream Ligar(Hid.Colecao c, out int outLen)
+    {
+        outLen = c.OutLen;
+        var h = Hid.Abrir(c.Caminho, true, true);
+        if (h.IsInvalid) return null;
+        try
+        {
+            var fs = new FileStream(h, FileAccess.ReadWrite, 1, true);
+            Ler(fs, c.InLen);
+            return fs;
+        }
+        catch { h.Dispose(); return null; }
+    }
+
+    void Ler(FileStream fs, int len)
+    {
+        if (fechado || len <= 0) return;
+        var b = new byte[len];
+        try
+        {
+            fs.BeginRead(b, 0, len, ar =>
+            {
+                try { int n = fs.EndRead(ar); if (n > 0 && !fechado) { fila.Add(b); Ler(fs, len); } }
+                catch { }
+            }, null);
+        }
+        catch { }
+    }
+
+    // manda [id, aparelho, feature, funcao|sw, parametros] e espera a resposta certa
+    public byte[] Pedir(byte idx, byte feat, int func, byte[] p, int ms)
+    {
+        byte[] lixo;
+        while (fila.TryTake(out lixo)) { }
+        bool usarLongo = longo != null && (curto == null || p.Length > 3);
+        var fs = usarLongo ? longo : curto;
+        if (fs == null) return null;
+        var b = new byte[usarLongo ? outLongo : outCurto];
+        b[0] = (byte)(usarLongo ? 0x11 : 0x10); b[1] = idx; b[2] = feat; b[3] = (byte)((func << 4) | SW);
+        Array.Copy(p, 0, b, 4, Math.Min(p.Length, b.Length - 4));
+        try { fs.Write(b, 0, b.Length); fs.Flush(); } catch { return null; }
+        var fim = DateTime.Now.AddMilliseconds(ms);
+        while (true)
+        {
+            int resta = (int)(fim - DateTime.Now).TotalMilliseconds;
+            if (resta <= 0) return null;
+            byte[] r;
+            if (!fila.TryTake(out r, resta)) return null;
+            if (r.Length < 5 || (r[0] != 0x10 && r[0] != 0x11) || r[1] != idx) continue;
+            if ((r[2] == 0x8F || r[2] == 0xFF) && r[3] == feat && r[4] == b[3]) return null;   // erro (HID++ 1.0 / 2.0)
+            if (r[2] == feat && r[3] == b[3]) { var s = new byte[r.Length - 4]; Array.Copy(r, 4, s, 0, s.Length); return s; }
+        }
+    }
+
+    public void Dispose()
+    {
+        fechado = true;
+        try { if (curto != null) curto.Dispose(); } catch { }
+        try { if (longo != null) longo.Dispose(); } catch { }
+    }
+
+    // ---- consulta de um aparelho (indice 0xFF = o proprio aparelho USB; 1-6 = aparelhos no receptor)
+    public class Info
+    {
+        public byte Indice; public int Versao; public string Nome; public int TipoLogi = -1;
+        public int Nivel = -1; public bool Carregando; public int FeatureBateria;
+    }
+
+    public Info Consultar(byte idx)
+    {
+        var pg = Pedir(idx, 0x00, 1, new byte[] { 0, 0, 0x5A }, 400);   // ping: versao do protocolo
+        if (pg == null || pg.Length < 3 || pg[2] != 0x5A || pg[0] < 2) return null;
+        var i = new Info { Indice = idx, Versao = pg[0] * 10 + pg[1] };
+        int fNome = Feature(idx, 0x0005);
+        if (fNome > 0)
+        {
+            var q = Pedir(idx, (byte)fNome, 0, new byte[0], 400);
+            int tam = q == null ? 0 : q[0];
+            var sb = new System.Text.StringBuilder();
+            while (sb.Length < tam && sb.Length < 64)
+            {
+                var t = Pedir(idx, (byte)fNome, 1, new byte[] { (byte)sb.Length }, 400);
+                if (t == null) break;
+                int antes = sb.Length;
+                foreach (var ch in t) { if (ch == 0 || sb.Length >= tam) break; sb.Append((char)ch); }
+                if (sb.Length == antes) break;
+            }
+            i.Nome = sb.ToString().Trim();
+            var ti = Pedir(idx, (byte)fNome, 2, new byte[0], 400);
+            if (ti != null) i.TipoLogi = ti[0];
+        }
+        foreach (int f in new[] { 0x1004, 0x1000, 0x1001, 0x1F20 })
+        {
+            int fi = Feature(idx, f);
+            if (fi <= 0) continue;
+            var r = Pedir(idx, (byte)fi, f == 0x1004 ? 1 : 0, new byte[0], 500);
+            int nivel; bool carr;
+            if (r != null && Logi.Decodificar(f, r, out nivel, out carr)) { i.Nivel = nivel; i.Carregando = carr; i.FeatureBateria = f; break; }
+        }
+        return i;
+    }
+
+    int Feature(byte idx, int id)
+    {
+        var r = Pedir(idx, 0x00, 0, new byte[] { (byte)(id >> 8), (byte)id, 0 }, 400);
+        return r == null ? -1 : r[0];
+    }
+}
+
+// ---- Razer: relatorio de 90 bytes (feature, id 0) na colecao principal; o mesmo em todos os
+// aparelhos sem fio da marca. Comando 0x07/0x80 = bateria (0-255), 0x07/0x84 = carregando.
+static class Razer
+{
+    static readonly byte[] TRANSACOES = { 0x1F, 0x3F, 0xFF, 0x9F };
+
+    public static byte[] Montar(byte transacao, byte classe, byte comando, byte tamanho)
+    {
+        var b = new byte[91];                       // [0] = id do relatorio
+        b[2] = transacao; b[6] = tamanho; b[7] = classe; b[8] = comando;
+        b[89] = Crc(b);
+        return b;
+    }
+
+    // XOR dos bytes 2..87 do relatorio (3..88 no buffer com o id na frente)
+    public static byte Crc(byte[] b) { byte c = 0; for (int i = 3; i < 89; i++) c ^= b[i]; return c; }
+
+    // resposta: [1] estado (2 = ok), [7]/[8] classe/comando, [10] valor
+    public static int Valor(byte[] r, byte classe, byte comando)
+    {
+        if (r == null || r.Length < 91 || r[1] != 0x02 || r[7] != classe || r[8] != comando) return -1;
+        return r[10];
+    }
+
+    public static int PorcentoDe(int bruto) { return bruto < 0 ? -1 : (int)Math.Round(bruto * 100.0 / 255); }
+
+    public static bool Ler(Hid.Colecao c, out int nivel, out bool carregando)
+    {
+        nivel = -1; carregando = false;
+        using (var rw = Hid.Abrir(c.Caminho, true))
+        using (var so = rw.IsInvalid ? Hid.Abrir(c.Caminho, false) : null)
+        {
+            var h = rw.IsInvalid ? so : rw;
+            if (h.IsInvalid) return false;
+            foreach (var t in TRANSACOES)
+            {
+                int bruto = Perguntar(h, t, 0x07, 0x80);
+                if (bruto < 0) continue;
+                if (bruto == 0) return false;               // com fio / sem bateria
+                nivel = PorcentoDe(bruto);
+                carregando = Perguntar(h, t, 0x07, 0x84) == 1;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static int Perguntar(SafeFileHandle h, byte transacao, byte classe, byte comando)
+    {
+        var p = Montar(transacao, classe, comando, 0x02);
+        if (!HidD_SetFeature(h, p, p.Length)) return -1;
+        for (int tentativa = 0; tentativa < 4; tentativa++)
+        {
+            Thread.Sleep(60);
+            var r = new byte[91];
+            if (!HidD_GetFeature(h, r, r.Length)) return -1;
+            if (r[1] == 0x01) continue;                     // ocupado: espera mais um pouco
+            return Valor(r, classe, comando);
+        }
+        return -1;
+    }
+
+    [DllImport("hid.dll")] static extern bool HidD_SetFeature(SafeFileHandle h, byte[] b, int n);
+    [DllImport("hid.dll")] static extern bool HidD_GetFeature(SafeFileHandle h, byte[] b, int n);
+}
+
+// decodificacao das respostas de bateria (separada para poder testar com respostas gravadas)
+static class Logi
+{
+    public static bool Decodificar(int feature, byte[] p, out int nivel, out bool carregando)
+    {
+        nivel = -1; carregando = false;
+        if (p == null || p.Length < 3) return false;
+        switch (feature)
+        {
+            case 0x1004:                                   // Unified Battery: %, nivel, estado, energia externa
+            {
+                int soc = p[0], faixa = p[1], st = p[2];
+                if (soc > 0 && soc <= 100) nivel = soc;
+                else if ((faixa & 8) != 0) nivel = 100;
+                else if ((faixa & 4) != 0) nivel = 60;
+                else if ((faixa & 2) != 0) nivel = 20;
+                else if ((faixa & 1) != 0) nivel = 5;
+                carregando = st == 1 || st == 2;
+                if (st == 3 && nivel < 0) nivel = 100;
+                return nivel >= 0;
+            }
+            case 0x1000:                                   // Battery Status: %, proximo nivel, estado
+            {
+                int st = p[2];
+                nivel = p[0] > 0 && p[0] <= 100 ? p[0] : (st == 3 ? 100 : -1);
+                carregando = st == 1 || st == 2 || st == 4;
+                return nivel >= 0;
+            }
+            case 0x1001:                                   // Battery Voltage: mV (2 bytes), flags
+            case 0x1F20:                                   // ADC Measurement (headsets): mV (2 bytes), flags
+            {
+                int mv = (p[0] << 8) | p[1];
+                if (mv < 2500 || mv > 5000) return false;
+                nivel = PorTensao(mv);
+                carregando = feature == 0x1001 && (p[2] & 0x80) != 0;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // curva tipica de pilha de litio (mV -> %), com interpolacao entre os pontos
+    static readonly int[,] CURVA = { { 4186, 100 }, { 4067, 90 }, { 3989, 80 }, { 3922, 70 }, { 3859, 60 }, { 3811, 50 }, { 3778, 40 }, { 3751, 30 }, { 3717, 20 }, { 3671, 10 }, { 3646, 5 }, { 3579, 2 }, { 3500, 0 } };
+
+    public static int PorTensao(int mv)
+    {
+        if (mv >= CURVA[0, 0]) return 100;
+        for (int k = 1; k < CURVA.GetLength(0); k++)
+        {
+            if (mv >= CURVA[k, 0])
+            {
+                double t = (mv - CURVA[k, 0]) / (double)(CURVA[k - 1, 0] - CURVA[k, 0]);
+                return (int)Math.Round(CURVA[k, 1] + t * (CURVA[k - 1, 1] - CURVA[k, 1]));
+            }
+        }
+        return 0;
+    }
+
+    public static Tipo TipoDe(int t)
+    {
+        switch (t)
+        {
+            case 0: case 2: return Tipo.Teclado;
+            case 3: case 4: case 5: return Tipo.Mouse;
+            case 8: return Tipo.Fone;
+            case 10: case 11: case 12: return Tipo.Controle;
+            default: return Tipo.Outro;
+        }
+    }
+
+    public static string NomeDoTipo(int t)
+    {
+        string[] n = { "teclado", "controle remoto", "teclado numérico", "mouse", "touchpad", "trackball", "apresentador", "receptor", "headset", "webcam", "volante", "joystick", "gamepad", "dock", "caixa de som", "microfone" };
+        return t >= 0 && t < n.Length ? n[t] : (t < 0 ? "?" : "tipo " + t);
+    }
+}
+
+// ---- leitura de todos os aparelhos USB/2.4 GHz e o texto do diagnostico
+static class Receptores
+{
+    public class Resultado
+    {
+        public List<Aparelho> Aparelhos = new List<Aparelho>();
+        public List<string> SemLeitura = new List<string>();   // receptor reconhecido que ainda nao sabemos ler
+        public string Diagnostico = "";
+    }
+
+    static readonly System.Text.RegularExpressions.Regex SEM_FIO = new System.Text.RegularExpressions.Regex(
+        "wireless|receiver|dongle|receptor|2\\.4|lightspeed|hyperspeed|slipstream|nano|unifying|bolt", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    static readonly object trava = new object();
+
+    public static Resultado Ler()
+    {
+        lock (trava) return LerSozinho();
+    }
+
+    static Resultado LerSozinho()
+    {
+        var res = new Resultado();
+        var d = new System.Text.StringBuilder();
+        List<Hid.Colecao> todas;
+        try { todas = Hid.Listar(); } catch (Exception ex) { res.Diagnostico = "HID: erro ao listar: " + ex.Message; return res; }
+        foreach (var g in todas.Where(c => !c.Bluetooth).GroupBy(c => c.Pai, StringComparer.OrdinalIgnoreCase))
+        {
+            var cols = g.ToList();
+            var c0 = cols[0];
+            string produto = cols.Select(c => c.Produto).FirstOrDefault(s => !string.IsNullOrEmpty(s)) ?? "";
+            string fab = cols.Select(c => c.Fabricante).FirstOrDefault(s => !string.IsNullOrEmpty(s)) ?? "";
+            d.AppendLine(string.Format("{0:X4}:{1:X4}  {2} {3}", c0.Vid, c0.Pid, fab, produto).TrimEnd());
+            d.AppendLine("   coleções: " + string.Join(", ", cols.Select(c => string.Format("{0:X4}/{1:X4} (in {2}, out {3}, feat {4})", c.UsagePage, c.Usage, c.InLen, c.OutLen, c.FeatLen))));
+            bool lido = false;
+
+            // 1. padrao USB de bateria
+            foreach (var c in cols)
+            {
+                string como; int n = -1;
+                try { n = Hid.BateriaPadrao(c, out como); } catch { como = null; }
+                if (n < 0) continue;
+                d.AppendLine("   padrão USB: " + n + "% (" + como + ")");
+                var a = new Aparelho { Id = "hid:" + g.Key, Nome = string.IsNullOrEmpty(produto) ? "Aparelho USB" : produto, Tipo = TipoPelaColecao(cols), Fonte = "USB" };
+                a.Valores.Add(new Valor { Rotulo = "", Nivel = n });
+                res.Aparelhos.Add(a); lido = true; break;
+            }
+
+            // 2. Logitech HID++
+            if (!lido && c0.Vid == 0x046D && cols.Any(c => c.UsagePage == 0xFF00 || c.UsagePage == 0xFF43))
+            {
+                HidPP pp = null;
+                try { pp = HidPP.Abrir(cols); } catch { }
+                if (pp == null) d.AppendLine("   HID++: não consegui abrir as coleções do fabricante");
+                else using (pp)
+                {
+                    foreach (byte idx in new byte[] { 0xFF, 1, 2, 3, 4, 5, 6 })
+                    {
+                        HidPP.Info i = null;
+                        try { i = pp.Consultar(idx); } catch { }
+                        if (i == null) continue;
+                        d.AppendLine(string.Format("   HID++ {0}: protocolo {1}.{2}, \"{3}\", {4}, bateria: {5}", idx == 0xFF ? "direto" : "aparelho " + idx, i.Versao / 10, i.Versao % 10, i.Nome, Logi.NomeDoTipo(i.TipoLogi),
+                            i.Nivel < 0 ? "não tem" : string.Format("{0}%{1} (feature {2:X4})", i.Nivel, i.Carregando ? " carregando" : "", i.FeatureBateria)));
+                        if (i.Nivel < 0 || i.TipoLogi == 7) continue;
+                        var a = new Aparelho { Id = string.Format("logi:{0}:{1}", g.Key, idx), Nome = string.IsNullOrEmpty(i.Nome) ? "Aparelho Logitech" : "Logitech " + i.Nome, Tipo = Logi.TipoDe(i.TipoLogi), Fonte = "Logitech" };
+                        if (a.Nome.StartsWith("Logitech Logitech")) a.Nome = a.Nome.Substring(9);
+                        a.Valores.Add(new Valor { Rotulo = "", Nivel = i.Nivel, Carregando = i.Carregando });
+                        res.Aparelhos.Add(a); lido = true;
+                    }
+                }
+            }
+
+            // 3. Razer
+            if (!lido && c0.Vid == 0x1532)
+            {
+                foreach (var c in cols.Where(x => x.FeatLen == 91))
+                {
+                    int n; bool carr = false; bool ok = false;
+                    try { ok = Razer.Ler(c, out n, out carr); } catch { n = -1; }
+                    d.AppendLine("   Razer " + string.Format("{0:X4}/{1:X4}", c.UsagePage, c.Usage) + ": " + (ok ? n + "%" + (carr ? " carregando" : "") : "sem resposta de bateria"));
+                    if (!ok) continue;
+                    var a = new Aparelho { Id = "razer:" + g.Key, Nome = string.IsNullOrEmpty(produto) ? "Aparelho Razer" : produto, Tipo = TipoPelaColecao(cols), Fonte = "Razer" };
+                    if (!a.Nome.StartsWith("Razer", StringComparison.OrdinalIgnoreCase)) a.Nome = "Razer " + a.Nome;
+                    a.Valores.Add(new Valor { Rotulo = "", Nivel = n, Carregando = carr });
+                    res.Aparelhos.Add(a); lido = true; break;
+                }
+            }
+
+            if (!lido && SEM_FIO.IsMatch(produto + " " + fab))
+            {
+                res.SemLeitura.Add(string.Format("{0} ({1:X4}:{2:X4})", (fab + " " + produto).Trim(), c0.Vid, c0.Pid));
+                d.AppendLine("   sem fio, sem leitura ainda");
+            }
+        }
+        res.Diagnostico = d.ToString();
+        return res;
+    }
+
+    static Tipo TipoPelaColecao(List<Hid.Colecao> cols)
+    {
+        if (cols.Any(c => c.UsagePage == 0x01 && c.Usage == 0x02)) return Tipo.Mouse;
+        if (cols.Any(c => c.UsagePage == 0x01 && c.Usage == 0x06)) return Tipo.Teclado;
+        if (cols.Any(c => c.UsagePage == 0x01 && (c.Usage == 0x04 || c.Usage == 0x05))) return Tipo.Controle;
+        if (cols.Any(c => c.UsagePage == 0x0B)) return Tipo.Fone;     // telefonia: headsets
+        return Tipo.Outro;
+    }
+}
+
 // ================================================================ juncao das fontes
 class Coletor
 {
@@ -274,6 +843,33 @@ class Coletor
     List<Windows_.Grupo> grupos = new List<Windows_.Grupo>();
     readonly Dictionary<ulong, int> gattCache = new Dictionary<ulong, int>();
     int ciclo;
+    Receptores.Resultado usb = new Receptores.Resultado();
+    public List<string> SemLeitura { get { return usb.SemLeitura; } }
+    public string FastPairErro;
+
+    // texto para "Copiar diagnostico": tudo o que cada fonte achou, sem nada gravado
+    public string Diagnostico()
+    {
+        var d = new System.Text.StringBuilder();
+        d.AppendLine("Juicebar " + Atualizador.Atual + " - diagnóstico de " + DateTime.Now.ToString("dd/MM/yyyy HH:mm"));
+        d.AppendLine("Windows " + Environment.OSVersion.Version + (Environment.Is64BitProcess ? " 64 bits" : " 32 bits"));
+        d.AppendLine();
+        d.AppendLine("== Bluetooth (Windows)");
+        try
+        {
+            foreach (var g in Windows_.Ler())
+                d.AppendLine(string.Format("{0} | {1} | bateria {2} | {3}{4}", g.Nome, g.Tipo, g.Bat < 0 ? "-" : g.Bat + "%", g.Conectado ? "conectado" : "desconectado", g.EnderecoLE != 0 ? " | LE" : ""));
+        }
+        catch (Exception ex) { d.AppendLine("erro: " + ex.Message); }
+        d.AppendLine();
+        d.AppendLine("== Fast Pair (anúncios dos últimos 10 min)");
+        if (FastPairErro != null) d.AppendLine("indisponível: " + FastPairErro);
+        foreach (var f in fp.Recentes()) d.AppendLine(f.Nome + " | " + BitConverter.ToString(f.Bat));
+        d.AppendLine();
+        d.AppendLine("== USB e receptores 2.4 GHz");
+        try { d.Append(Receptores.Ler().Diagnostico); } catch (Exception ex) { d.AppendLine("erro: " + ex.Message); }
+        return d.ToString();
+    }
 
     public Coletor(Control ui)
     {
@@ -303,6 +899,7 @@ class Coletor
     {
         if (Demo) { Postar(MontarDemo); return null; }
         var erro = fp.Iniciar();
+        FastPairErro = erro;
         var t = new Thread(Laco) { IsBackground = true, Name = "coletor" };
         t.Start();
         return erro;
@@ -323,11 +920,23 @@ class Coletor
                     if (lerGatt || !gattCache.ContainsKey(x.EnderecoLE)) gattCache[x.EnderecoLE] = Gatt.Ler(x.EnderecoLE);
                     x.Bat = gattCache[x.EnderecoLE];
                 }
-                Postar(() => { grupos = g; Montar(); });
+                Receptores.Resultado u = null;
+                if (ciclo % 3 == 1)                                 // USB/2.4 GHz: a cada ~1 min
+                    try { u = Receptores.Ler(); } catch { }
+                Postar(() => { grupos = g; if (u != null) usb = Manter(usb, u); Montar(); });
             }
             catch { }
             Thread.Sleep(20000);
         }
+    }
+
+    // aparelho no receptor que cochilou e nao respondeu: fica com a ultima leitura por ate 5 min
+    static Receptores.Resultado Manter(Receptores.Resultado velho, Receptores.Resultado novo)
+    {
+        foreach (var a in novo.Aparelhos) a.Visto = DateTime.Now;
+        foreach (var a in velho.Aparelhos)
+            if (!novo.Aparelhos.Any(x => x.Id == a.Id) && (DateTime.Now - a.Visto).TotalMinutes < 5) novo.Aparelhos.Add(a);
+        return novo;
     }
 
     void Postar(Action a)
@@ -355,6 +964,7 @@ class Coletor
             else a.Valores.Add(new Valor { Rotulo = "", Nivel = g.Bat });
             lista.Add(a);
         }
+        lista.AddRange(usb.Aparelhos);
         Aparelhos = lista.OrderBy(x => x.Tipo).ThenBy(x => x.Nome).ToList();
         Atualizado = DateTime.Now;
         if (Mudou != null) Mudou();
@@ -436,6 +1046,8 @@ class Widget : Form
     readonly System.Windows.Forms.Timer relogio = new System.Windows.Forms.Timer();
     readonly ToolTip dica = new ToolTip();
     readonly ContextMenuStrip menu = new ContextMenuStrip();
+    readonly System.Windows.Forms.Timer checagem = new System.Windows.Forms.Timer();
+    bool procurando;
     IntPtr barra = IntPtr.Zero;
     Rectangle onde;
     int largura;
@@ -454,13 +1066,28 @@ class Widget : Form
         col.Mudou += () => { Encaixar(); Desenhar(); AtualizarDica(); };
 
         menu.Items.Add("Detalhes", null, (s, e) => AbrirDetalhes());
+        var atualizar = new ToolStripMenuItem("Procurar atualizações");
+        atualizar.Click += (s, e) => ProcurarAtualizacao(true);
+        menu.Items.Add(atualizar);
+        menu.Items.Add("Copiar diagnóstico", null, (s, e) => CopiarDiagnostico());
         var auto = new ToolStripMenuItem("Iniciar com o Windows");
         auto.Click += (s, e) => { Inicio.Ligar(!Inicio.Ligado()); };
         menu.Items.Add(auto);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Sair", null, (s, e) => { col.Parar(); Application.Exit(); });
-        menu.Opening += (s, e) => { auto.Checked = Inicio.Ligado(); };
+        menu.Opening += (s, e) =>
+        {
+            auto.Checked = Inicio.Ligado();
+            var r = Atualizador.Disponivel;
+            atualizar.Text = r == null ? "Procurar atualizações" : "Atualizar para a versão " + r.Tag.TrimStart('v');
+            atualizar.Font = new Font(menu.Font, r == null ? FontStyle.Regular : FontStyle.Bold);
+            atualizar.Image = r == null ? null : PontoAmarelo(12);
+        };
         dica.InitialDelay = 300;
+
+        // procura versao nova 20 s depois de abrir e depois a cada 6 h, sem avisar se nao tiver
+        checagem.Interval = 20000;
+        checagem.Tick += (s, e) => { checagem.Interval = 6 * 3600 * 1000; ProcurarAtualizacao(false); };
 
         MouseUp += (s, e) =>
         {
@@ -488,6 +1115,68 @@ class Widget : Form
         Encaixar(); Desenhar(); AtualizarDica();
         if (erro != null) dica.SetToolTip(this, "Bluetooth indisponível: " + erro);
         relogio.Start();
+        if (!Coletor.Demo) checagem.Start();
+    }
+
+    // manual = clicou no menu: mostra o resultado e oferece instalar; automatico: so acende o ponto
+    void ProcurarAtualizacao(bool manual)
+    {
+        if (procurando) return;
+        var r0 = Atualizador.Disponivel;
+        if (manual && r0 != null) { OferecerInstalar(r0); return; }
+        procurando = true;
+        new Thread(() =>
+        {
+            string erro;
+            var r = Atualizador.Procurar(out erro);
+            try
+            {
+                BeginInvoke(new Action(() =>
+                {
+                    procurando = false;
+                    if (erro == null) { Atualizador.Disponivel = r; Desenhar(); AtualizarDica(); }
+                    if (!manual) return;
+                    if (erro != null) MessageBox.Show("Não consegui procurar atualizações agora.\n\n" + erro, "Juicebar", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    else if (r == null) MessageBox.Show("Você já está na versão mais nova (" + Atualizador.Atual + ").", "Juicebar", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    else OferecerInstalar(r);
+                }));
+            }
+            catch { procurando = false; }
+        }) { IsBackground = true }.Start();
+    }
+
+    void OferecerInstalar(Atualizador.Release r)
+    {
+        string txt = "Tem uma versão nova do Juicebar: " + r.Tag.TrimStart('v') + (r.Beta ? " (beta)" : "") + ".\nVocê está na " + Atualizador.Atual + ".\n\nAtualizar agora? O Juicebar fecha e abre de novo sozinho.";
+        var resp = MessageBox.Show(txt, "Juicebar", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question, MessageBoxDefaultButton.Button1);
+        if (resp != DialogResult.Yes) return;
+        Cursor = Cursors.WaitCursor;
+        var erro = Atualizador.Instalar(r);
+        Cursor = Cursors.Default;
+        if (erro == null) { col.Parar(); Application.Exit(); return; }
+        if (MessageBox.Show("Não consegui atualizar sozinho: " + erro + "\n\nAbrir a página da versão nova para baixar?", "Juicebar", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes && r.Pagina != null)
+            try { Process.Start(r.Pagina); } catch { }
+    }
+
+    void CopiarDiagnostico()
+    {
+        Cursor = Cursors.WaitCursor;
+        string txt;
+        try { txt = col.Diagnostico(); } catch (Exception ex) { txt = "erro no diagnóstico: " + ex.Message; }
+        Cursor = Cursors.Default;
+        try { Clipboard.SetText(txt); } catch { }
+        MessageBox.Show("O diagnóstico foi copiado. Ele lista os aparelhos e receptores que o Juicebar achou e o que cada um respondeu.\n\nSe algum aparelho sem fio não aparece na barra, abra uma issue em github.com/caiquebmaso/juicebar/issues e cole o texto.", "Juicebar", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    public static Bitmap PontoAmarelo(int t)
+    {
+        var b = new Bitmap(t, t);
+        using (var g = Graphics.FromImage(b))
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (var br = new SolidBrush(Color.FromArgb(255, 200, 0))) g.FillEllipse(br, 1, 1, t - 3, t - 3);
+        }
+        return b;
     }
 
     void AbrirDetalhes()
@@ -587,6 +1276,11 @@ class Widget : Form
                         Bloco(g, a, x, w, H, fIcone, fGrande, fPeq, fRot);
                         x += w;
                     }
+                    if (Atualizador.Disponivel != null)            // versao nova: ponto amarelo no canto
+                    {
+                        using (var borda = new SolidBrush(Color.FromArgb(200, 30, 30, 30))) g.FillEllipse(borda, W - 11, 3, 9, 9);
+                        using (var am = new SolidBrush(Color.FromArgb(255, 200, 0))) g.FillEllipse(am, W - 10, 4, 7, 7);
+                    }
                 }
             }
             Aplicar(bmp);
@@ -650,8 +1344,10 @@ class Widget : Form
 
     void AtualizarDica()
     {
-        if (col.Aparelhos.Count == 0) { dica.SetToolTip(this, "Nenhum aparelho sem fio com bateria conectado"); return; }
+        string aviso = Atualizador.Disponivel == null ? "" : "Versão nova disponível: " + Atualizador.Disponivel.Tag.TrimStart('v') + " (clique direito > Atualizar)\n\n";
+        if (col.Aparelhos.Count == 0) { dica.SetToolTip(this, aviso + "Nenhum aparelho sem fio com bateria conectado"); return; }
         var linhas = new List<string>();
+        if (aviso.Length > 0) linhas.Add(aviso.TrimEnd('\n') + "\n");
         foreach (var a in col.Aparelhos)
         {
             linhas.Add(a.Nome);
@@ -711,6 +1407,7 @@ class Detalhes : Form
         int h = 20;
         foreach (var a in col.Aparelhos) h += 44 + a.Valores.Count * 34 + 10;
         if (col.Aparelhos.Count == 0) h = 80;
+        h += AlturaSemLeitura();
         ClientSize = new Size(400, h + 34);
         corpo.SetBounds(0, 0, 400, h);
         rodape.SetBounds(20, h + 6, 360, 22);
@@ -735,6 +1432,7 @@ class Detalhes : Form
             if (col.Aparelhos.Count == 0)
             {
                 g.DrawString("Nenhum aparelho sem fio com bateria conectado.", fTxt, cinza, 20, 28);
+                SemLeitura(g, 80, fNome, fPeq, branco, cinza);
                 return;
             }
             float y = 20;
@@ -742,7 +1440,7 @@ class Detalhes : Form
             {
                 g.DrawString(Visual.Glifo(a.Tipo), fIcone, branco, 18, y + 2);
                 g.DrawString(a.Nome, fNome, branco, 50, y);
-                g.DrawString(a.Fonte == "Fast Pair" ? "cada lado pelo Fast Pair" : "pelo Windows", fPeq, cinza, 50, y + 20);
+                g.DrawString(a.Fonte == "Fast Pair" ? "cada lado pelo Fast Pair" : a.Fonte == "Logitech" ? "pelo receptor Logitech" : a.Fonte == "USB" ? "pelo padrão USB de bateria" : a.Fonte == "Razer" ? "pelo receptor Razer" : "pelo Windows", fPeq, cinza, 50, y + 20);
                 y += 44;
                 foreach (var v in a.Valores)
                 {
@@ -761,8 +1459,21 @@ class Detalhes : Form
                 }
                 y += 10;
             }
+            SemLeitura(g, y, fNome, fPeq, branco, cinza);
         }
     }
+
+    // receptores sem fio que o Juicebar reconheceu mas ainda nao sabe ler
+    void SemLeitura(Graphics g, float y, Font fNome, Font fPeq, Brush branco, Brush cinza)
+    {
+        if (col.SemLeitura.Count == 0) return;
+        g.DrawString("Sem leitura ainda", fNome, branco, 20, y);
+        y += 24;
+        foreach (var s in col.SemLeitura) { g.DrawString(s, fPeq, cinza, 20, y); y += 18; }
+        g.DrawString("Clique direito > Copiar diagnóstico e abra uma issue no GitHub.", fPeq, cinza, 20, y + 4);
+    }
+
+    int AlturaSemLeitura() { return col.SemLeitura.Count == 0 ? 0 : 24 + col.SemLeitura.Count * 18 + 30; }
 }
 
 // ================================================================ Win32
@@ -792,6 +1503,116 @@ static class N
     [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
 }
 
+// ================================================================ atualizacoes (releases do GitHub)
+// Versao estavel so ve versao estavel; versao beta ve as duas.
+static class Versao
+{
+    public static int[] Numeros(string v, out string pre)
+    {
+        v = (v ?? "").Trim().TrimStart('v', 'V');
+        pre = "";
+        int h = v.IndexOf('-');
+        if (h >= 0) { pre = v.Substring(h + 1); v = v.Substring(0, h); }
+        var p = v.Split('.');
+        var n = new int[3];
+        for (int i = 0; i < 3 && i < p.Length; i++) int.TryParse(p[i], out n[i]);
+        return n;
+    }
+
+    public static bool Beta(string v) { string pre; Numeros(v, out pre); return pre.Length > 0; }
+
+    // >0 se a for mais nova que b
+    public static int Comparar(string a, string b)
+    {
+        string pa, pb;
+        var na = Numeros(a, out pa); var nb = Numeros(b, out pb);
+        for (int i = 0; i < 3; i++) if (na[i] != nb[i]) return na[i].CompareTo(nb[i]);
+        if (pa.Length == 0 && pb.Length == 0) return 0;
+        if (pa.Length == 0) return 1;                 // 1.1.0 e mais nova que 1.1.0-beta
+        if (pb.Length == 0) return -1;
+        return string.CompareOrdinal(pa, pb);
+    }
+}
+
+static class Atualizador
+{
+    const string REPO = "caiquebmaso/juicebar";
+    public static string Atual = ((System.Reflection.AssemblyInformationalVersionAttribute)Attribute.GetCustomAttribute(
+        System.Reflection.Assembly.GetExecutingAssembly(), typeof(System.Reflection.AssemblyInformationalVersionAttribute))).InformationalVersion;
+
+    public class Release { public string Tag, Pagina, Exe; public bool Beta; }
+    public static Release Disponivel;          // != null: tem versao nova (ponto amarelo na barra)
+
+    public static Release Procurar(out string erro)
+    {
+        erro = null;
+        try
+        {
+            ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072;    // TLS 1.2
+            string json;
+            using (var wc = new WebClient())
+            {
+                wc.Headers[HttpRequestHeader.UserAgent] = "Juicebar";
+                wc.Headers[HttpRequestHeader.Accept] = "application/vnd.github+json";
+                wc.Encoding = System.Text.Encoding.UTF8;
+                json = wc.DownloadString("https://api.github.com/repos/" + REPO + "/releases?per_page=30");
+            }
+            var lista = new System.Web.Script.Serialization.JavaScriptSerializer().DeserializeObject(json) as object[];
+            Release melhor = null;
+            bool aceitaBeta = Versao.Beta(Atual);
+            foreach (var o in lista ?? new object[0])
+            {
+                var r = o as Dictionary<string, object>;
+                if (r == null || true.Equals(r["draft"])) continue;
+                bool beta = true.Equals(r["prerelease"]);
+                if (beta && !aceitaBeta) continue;
+                string tag = r["tag_name"] as string;
+                if (tag == null || Versao.Comparar(tag, Atual) <= 0) continue;
+                if (melhor != null && Versao.Comparar(tag, melhor.Tag) <= 0) continue;
+                string exe = null;
+                foreach (var ao in (r["assets"] as object[]) ?? new object[0])
+                {
+                    var a = ao as Dictionary<string, object>;
+                    if (a != null && string.Equals(a["name"] as string, "juicebar.exe", StringComparison.OrdinalIgnoreCase)) exe = a["browser_download_url"] as string;
+                }
+                melhor = new Release { Tag = tag, Pagina = r["html_url"] as string, Exe = exe, Beta = beta };
+            }
+            return melhor;
+        }
+        catch (Exception ex) { erro = ex.Message; return null; }
+    }
+
+    // baixa o .exe novo, troca pelo atual (o que esta rodando vira .velho) e abre o novo
+    public static string Instalar(Release r)
+    {
+        if (r.Exe == null) return "a versão " + r.Tag + " não tem o juicebar.exe anexado";
+        string exe = Application.ExecutablePath, novo = exe + ".novo", velho = exe + ".velho";
+        try
+        {
+            ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072;
+            using (var wc = new WebClient())
+            {
+                wc.Headers[HttpRequestHeader.UserAgent] = "Juicebar";
+                wc.DownloadFile(r.Exe, novo);
+            }
+            var b = File.ReadAllBytes(novo);
+            if (b.Length < 20000 || b[0] != 'M' || b[1] != 'Z') { File.Delete(novo); return "o arquivo baixado não é um programa válido"; }
+            if (File.Exists(velho)) File.Delete(velho);
+            File.Move(exe, velho);
+            try { File.Move(novo, exe); }
+            catch { File.Move(velho, exe); throw; }
+            Process.Start(exe, "--esperar");
+            return null;
+        }
+        catch (Exception ex) { try { if (File.Exists(novo)) File.Delete(novo); } catch { } return ex.Message; }
+    }
+
+    public static void LimparVelho()
+    {
+        try { var v = Application.ExecutablePath + ".velho"; if (File.Exists(v)) File.Delete(v); } catch { }
+    }
+}
+
 // "Iniciar com o Windows": entrada Juicebar em HKCU\...\Run apontando para este .exe
 static class Inicio
 {
@@ -817,15 +1638,121 @@ static class Inicio
     }
 }
 
+// ================================================================ testes (--testar)
+// Respostas montadas byte a byte pela documentacao de cada protocolo, sem aparelho conectado.
+static class Testes
+{
+    static int falhas; static System.Text.StringBuilder log;
+
+    static void Conferir(string nome, object esperado, object obtido)
+    {
+        bool ok = Equals(esperado, obtido);
+        if (!ok) falhas++;
+        log.AppendLine((ok ? "ok    " : "FALHA ") + nome + (ok ? "" : "  esperado " + esperado + ", veio " + obtido));
+    }
+
+    static void Logitech(string nome, int feature, byte[] resp, int nivel, bool carregando)
+    {
+        int n; bool c;
+        bool ok = Logi.Decodificar(feature, resp, out n, out c);
+        Conferir(nome, nivel + "|" + carregando, ok ? n + "|" + c : "sem leitura");
+    }
+
+    public static int Rodar(string arquivo)
+    {
+        falhas = 0; log = new System.Text.StringBuilder();
+        log.AppendLine("Juicebar " + Atualizador.Atual + " - testes");
+
+        // Logitech 0x1004 Unified Battery, funcao get_status: [%, faixa, estado, energia externa]
+        Logitech("1004 85% descarregando", 0x1004, new byte[] { 85, 0x04, 0x00, 0x00 }, 85, false);
+        Logitech("1004 40% carregando", 0x1004, new byte[] { 40, 0x02, 0x01, 0x01 }, 40, true);
+        Logitech("1004 sem %, faixa boa", 0x1004, new byte[] { 0, 0x04, 0x00, 0x00 }, 60, false);
+        Logitech("1004 sem %, faixa critica", 0x1004, new byte[] { 0, 0x01, 0x00, 0x00 }, 5, false);
+        Logitech("1004 carga completa", 0x1004, new byte[] { 100, 0x08, 0x03, 0x01 }, 100, false);
+        // Logitech 0x1000 Battery Status: [%, proximo nivel, estado]
+        Logitech("1000 50% descarregando", 0x1000, new byte[] { 50, 20, 0x00 }, 50, false);
+        Logitech("1000 70% carregando", 0x1000, new byte[] { 70, 50, 0x01 }, 70, true);
+        Logitech("1000 carregado", 0x1000, new byte[] { 0, 0, 0x03 }, 100, false);
+        // Logitech 0x1001 Battery Voltage: [mV alto, mV baixo, flags]
+        Logitech("1001 4186 mV", 0x1001, new byte[] { 0x10, 0x5A, 0x00 }, 100, false);
+        Logitech("1001 3811 mV", 0x1001, new byte[] { 0x0E, 0xE3, 0x00 }, 50, false);
+        Logitech("1001 3900 mV carregando", 0x1001, new byte[] { 0x0F, 0x3C, 0x80 }, 67, true);
+        int n0; bool c0;
+        Conferir("1001 tensao absurda nao vira leitura", false, Logi.Decodificar(0x1001, new byte[] { 0x00, 0x10, 0x00 }, out n0, out c0));
+        // 0x1F20 ADC (headsets)
+        Logitech("1F20 3717 mV", 0x1F20, new byte[] { 0x0E, 0x85, 0x01 }, 20, false);
+
+        // Razer: pedido de bateria (classe 0x07, comando 0x80) e resposta com 0xB3 (179/255 = 70%)
+        var rz = Razer.Montar(0x1F, 0x07, 0x80, 0x02);
+        Conferir("Razer pedido: transação, tamanho, classe, comando", "1F-02-07-80", string.Format("{0:X2}-{1:X2}-{2:X2}-{3:X2}", rz[2], rz[6], rz[7], rz[8]));
+        Conferir("Razer pedido: CRC (sem estado e transação)", (byte)(0x02 ^ 0x07 ^ 0x80), rz[89]);
+        var rr = new byte[91]; rr[1] = 0x02; rr[2] = 0x1F; rr[6] = 0x02; rr[7] = 0x07; rr[8] = 0x80; rr[10] = 0xB3;
+        Conferir("Razer resposta 0xB3 = 70%", 70, Razer.PorcentoDe(Razer.Valor(rr, 0x07, 0x80)));
+        rr[1] = 0x05;
+        Conferir("Razer comando não suportado", -1, Razer.Valor(rr, 0x07, 0x80));
+
+        // padrao USB: valor bruto -> %
+        Conferir("HID 0-255 valor 128", 50, Hid.Escala(128, 0, 255, false));
+        Conferir("HID 0-100 valor 73", 73, Hid.Escala(73, 0, 100, false));
+        Conferir("HID fora da faixa", -1, Hid.Escala(300, 0, 255, false));
+        Conferir("HID 0x85/0x65 ja em %", 42, Hid.Escala(42, 0, 0, true));
+
+        // Fast Pair: 2C FE | flags | campo 0x33 (3 bytes, tipo 3) E=90 D=35 estojo=60 carregando
+        var fp = FastPair.Decodificar(new byte[] { 0x2C, 0xFE, 0x00, 0x33, 90, 35, 0x80 | 60 });
+        Conferir("Fast Pair E/D/estojo", "5A-23-BC", fp == null ? "nada" : BitConverter.ToString(fp));
+
+        // versoes
+        Conferir("1.1.0 > 1.0.0", true, Versao.Comparar("v1.1.0", "1.0.0") > 0);
+        Conferir("1.1.0 > 1.1.0-beta", true, Versao.Comparar("1.1.0", "1.1.0-beta") > 0);
+        Conferir("1.1.0-beta.2 > 1.1.0-beta", true, Versao.Comparar("v1.1.0-beta.2", "1.1.0-beta") > 0);
+        Conferir("1.0.0 = v1.0.0", 0, Versao.Comparar("1.0.0", "v1.0.0"));
+        Conferir("1.0.10 > 1.0.9", true, Versao.Comparar("1.0.10", "1.0.9") > 0);
+        Conferir("beta reconhecida", true, Versao.Beta("1.1.0-beta"));
+
+        log.AppendLine(falhas == 0 ? "TUDO OK" : falhas + " falha(s)");
+        File.WriteAllText(arquivo, log.ToString(), System.Text.Encoding.UTF8);
+        return falhas;
+    }
+}
+
 static class Programa
 {
     [STAThread]
+    static string Arg(string[] args, string nome)
+    {
+        int i = Array.FindIndex(args, a => a.Equals(nome, StringComparison.OrdinalIgnoreCase));
+        if (i < 0) return null;
+        return i + 1 < args.Length ? args[i + 1] : "";
+    }
+
     static void Main(string[] args)
     {
+        // --versao X: finge outra versao (para testar o aviso de atualizacao)
+        var fingir = Arg(args, "--versao");
+        if (!string.IsNullOrEmpty(fingir)) Atualizador.Atual = fingir;
+
+        // --testar [arquivo]: roda os testes de decodificacao e sai (codigo de saida = falhas)
+        var testar = Arg(args, "--testar");
+        if (testar != null) { Environment.Exit(Testes.Rodar(testar.Length > 0 ? testar : Path.Combine(Path.GetTempPath(), "juicebar-testes.txt"))); return; }
+
+        // --diagnostico [arquivo]: grava o diagnostico USB/HID e sai
+        var diag = Arg(args, "--diagnostico");
+        if (diag != null)
+        {
+            File.WriteAllText(diag.Length > 0 ? diag : Path.Combine(Path.GetTempPath(), "juicebar-diagnostico.txt"), Receptores.Ler().Diagnostico, System.Text.Encoding.UTF8);
+            return;
+        }
+
         bool novo;
         using (var m = new Mutex(true, "Juicebar", out novo))
         {
+            if (!novo && args.Any(a => a.Equals("--esperar", StringComparison.OrdinalIgnoreCase)))
+            {
+                // depois de atualizar: espera a versao antiga fechar
+                try { novo = m.WaitOne(15000); } catch (AbandonedMutexException) { novo = true; }
+            }
             if (!novo) return;
+            Atualizador.LimparVelho();
             Coletor.Demo = args.Any(a => a.Equals("--demo", StringComparison.OrdinalIgnoreCase));
             N.SetProcessDPIAware();
             Application.EnableVisualStyles();

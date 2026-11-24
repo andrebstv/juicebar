@@ -10,7 +10,7 @@ Fones com Fast Pair do Google (por exemplo, vários modelos da JBL) aparecem com
 
 ## Instalar
 
-1. Baixe o `juicebar.exe` da [última versão](https://github.com/caiquebmaso/juicebar/releases/latest).
+1. Baixe o `juicebar.exe` da [última versão](https://github.com/caiquebmaso/juicebar/releases/latest) (ou da beta mais recente, na lista de [releases](https://github.com/caiquebmaso/juicebar/releases)).
 2. Coloque num lugar fixo, por exemplo `%LOCALAPPDATA%\Juicebar`, e abra com dois cliques.
 3. Para abrir sozinho com o Windows: clique direito no Juicebar na barra e marque **Iniciar com o Windows**.
 
@@ -30,8 +30,18 @@ Na barra, à esquerda do clima e da área de notificação:
 - cada aparelho conectado tem o seu ícone (fone, mouse, teclado, controle) e uma pilha com a porcentagem, um ao lado do outro;
 - cores: branco acima de 40%, laranja até 40%, vermelho até 20%, verde carregando; o ícone pega a cor do nível mais baixo do aparelho;
 - passar o mouse mostra todos os aparelhos, cada lado do fone, o estojo e a hora da leitura;
-- clique esquerdo abre a janela de detalhes; clique direito tem Detalhes, Iniciar com o Windows e Sair;
+- clique esquerdo abre a janela de detalhes; clique direito tem Detalhes, Procurar atualizações, Copiar diagnóstico, Iniciar com o Windows e Sair;
 - sem nenhum aparelho com bateria conectado, fica só um ícone de Bluetooth apagado.
+
+### Atualizações
+
+O Juicebar procura versão nova nos releases deste repositório ao abrir e depois a cada 6 horas. Quando tem, aparece um **ponto amarelo** no canto do Juicebar na barra, e o clique direito mostra **Atualizar para a versão X**. Ao confirmar, ele baixa o `juicebar.exe` novo, troca pelo atual e abre de novo sozinho. Também dá para procurar na hora pelo clique direito, em **Procurar atualizações**.
+
+Quem está numa versão estável só recebe versão estável; quem está numa beta recebe as betas também.
+
+### Diagnóstico
+
+Clique direito > **Copiar diagnóstico** copia uma lista de tudo o que o Juicebar achou: aparelhos Bluetooth, anúncios Fast Pair, receptores USB e o que cada um respondeu. Se um aparelho sem fio não aparece na barra, abra uma [issue](https://github.com/caiquebmaso/juicebar/issues) e cole esse texto. Receptores sem fio que ele reconhece mas ainda não sabe ler aparecem em **Sem leitura ainda**, na janela de detalhes.
 
 Para ver o visual sem aparelho nenhum: `juicebar.bat --demo` (fone, mouse e teclado de exemplo, como na imagem acima).
 
@@ -49,12 +59,23 @@ O `juicebar.ico` é gerado pelo `tools\gerar-icone.ps1` (cada tamanho desenhado 
 2. **Bluetooth LE:** aparelho LE conectado sem bateria no Windows. O programa lê o serviço padrão de bateria (0x180F / 0x2A19) a cada 2 min.
 3. **Fast Pair:** fones que anunciam a bateria de cada lado e do estojo (serviço 0xFE2C). Só vale para fone conectado a este PC, casado pelo nome, para que o fone de outra pessoa por perto não apareça.
 
-Tudo é só leitura: o programa não conecta, não pareia e não grava nada no aparelho.
+4. **USB e receptores 2.4 GHz** (a cada 1 min). No 2.4 GHz não existe um padrão único: cada marca passa a bateria pelo receptor do seu jeito. O Juicebar tenta, em ordem:
+   - o **padrão USB de bateria** (HID, Battery Strength), que vale para qualquer marca que o siga;
+   - **Logitech** (Lightspeed, Unifying, Bolt e aparelhos Logitech por cabo), pelo protocolo HID++, inclusive com o G HUB aberto;
+   - **Razer** (receptores HyperSpeed e aparelhos sem fio da marca), pelo protocolo de relatórios da Razer.
 
-## O que não entra
+Tudo é só leitura: o programa não conecta, não pareia e não grava nada no aparelho. Nos receptores ele só faz perguntas de leitura (versão, nome, bateria).
 
-- Aparelhos com receptor USB próprio (Logitech Lightspeed/Unifying/Bolt, Razer, Corsair, SteelSeries): cada marca passa a bateria pelo receptor do seu jeito.
+## O que ainda não entra
+
+- Corsair, SteelSeries, HyperX e outras marcas com receptor próprio: cada modelo tem o seu protocolo e elas vão entrar uma por vez. Se o seu não aparece, mande o diagnóstico numa issue.
 - Aparelhos com fio.
+
+## Testes
+
+`juicebar.exe --testar arquivo.txt` confere a leitura de cada protocolo com respostas montadas byte a byte pela documentação (Logitech, Razer, padrão USB, Fast Pair) e a comparação de versões. O código de saída é o número de falhas.
+
+`juicebar.exe --diagnostico arquivo.txt` grava o diagnóstico dos aparelhos USB e sai.
 
 ## Como ele fica na barra
 
