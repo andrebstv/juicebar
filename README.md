@@ -85,6 +85,10 @@ O programa cria uma janela filha da barra de tarefas (`Shell_TrayWnd`), desenhad
 
 Windows 10 ou 11, com Bluetooth e .NET Framework 4.x (já vem no Windows).
 
+## Contribuir
+
+Tem um aparelho sem fio que não aparece? Veja o [CONTRIBUTING.md](CONTRIBUTING.md): dá para ajudar só mandando o diagnóstico, ou mandando o código por pull request.
+
 ## Licença
 
 [MIT](LICENSE)

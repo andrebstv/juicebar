@@ -1,0 +1,54 @@
+name: Meu aparelho não aparece
+description: Um aparelho sem fio não mostra a bateria no Juicebar (ou mostra errado)
+title: "[Aparelho] Marca e modelo"
+labels: ["aparelho novo"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Obrigado por ajudar. Com o diagnóstico dá para ver o que o receptor responde e fazer a marca entrar no Juicebar.
+        Passo a passo completo em [CONTRIBUTING.md](https://github.com/caiquebmaso/juicebar/blob/main/CONTRIBUTING.md).
+  - type: input
+    id: aparelho
+    attributes:
+      label: Marca e modelo do aparelho
+      placeholder: "Ex.: Redragon M686 Vampire Elite"
+    validations:
+      required: true
+  - type: dropdown
+    id: conexao
+    attributes:
+      label: Como ele está conectado
+      options:
+        - Receptor USB 2.4 GHz
+        - Bluetooth
+        - Cabo USB
+    validations:
+      required: true
+  - type: input
+    id: versao
+    attributes:
+      label: Versão do Juicebar
+      description: Aparece na primeira linha do diagnóstico.
+      placeholder: "Ex.: 1.1.0-beta"
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostico
+    attributes:
+      label: Diagnóstico
+      description: Clique direito no Juicebar na barra > Copiar diagnóstico, e cole aqui com o aparelho ligado.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: bateria-real
+    attributes:
+      label: Bateria que o programa da marca mostra
+      description: Para conferir a leitura. Diga também se estava carregando.
+      placeholder: "Ex.: 80%, sem carregar"
+  - type: textarea
+    id: captura
+    attributes:
+      label: Captura USB (opcional)
+      description: Se você gravou com o Wireshark + USBPcap enquanto o programa da marca mostrava a bateria, anexe o arquivo .pcapng aqui (pode ser compactado em .zip).
