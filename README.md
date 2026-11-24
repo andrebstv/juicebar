@@ -1,0 +1,55 @@
+# Bateria dos aparelhos
+
+Mostra na barra de tarefas do Windows a bateria dos aparelhos sem fio conectados ao PC: fone, mouse, teclado, controle.
+
+Fones com Fast Pair do Google (por exemplo, vários modelos da JBL) aparecem com cada lado separado, E (esquerdo) e D (direito). O Windows e a maioria dos programas só mostram um número para o fone inteiro.
+
+Não precisa instalar nada: o programa é compilado com o compilador de C# que já vem no Windows (.NET Framework 4).
+
+## Como usar
+
+1. Baixe ou clone o repositório.
+2. Clique duas vezes em `bateria-dos-aparelhos.bat`. Na primeira vez ele compila o programa em `%LOCALAPPDATA%\BateriaDosAparelhos` e depois abre. Se o `.cs` mudar, ele compila de novo.
+
+Na barra, à esquerda do clima e da área de notificação:
+
+- cada aparelho tem um ícone (fone, mouse, teclado, controle) e uma pilha com a porcentagem;
+- cores: branco acima de 40%, laranja até 40%, vermelho até 20%, verde carregando;
+- passar o mouse mostra todos os aparelhos, cada lado do fone, o estojo e a hora da leitura;
+- clique esquerdo abre a janela de detalhes; clique direito tem Detalhes e Sair;
+- sem nenhum aparelho com bateria conectado, fica só um ícone de Bluetooth apagado.
+
+### Abrir com o Windows
+
+Depois de abrir uma vez pelo `.bat`, rode no PowerShell:
+
+```powershell
+Set-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run -Name BateriaDosAparelhos -Value "`"$env:LOCALAPPDATA\BateriaDosAparelhos\bateria-dos-aparelhos.exe`""
+```
+
+Para tirar:
+
+```powershell
+Remove-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run -Name BateriaDosAparelhos
+```
+
+## De onde vem a bateria
+
+1. **Windows:** a bateria que o Windows já recebe de qualquer aparelho Bluetooth conectado (a mesma de Configurações > Bluetooth). Lida a cada 20 s.
+2. **Bluetooth LE:** aparelho LE conectado sem bateria no Windows. O programa lê o serviço padrão de bateria (0x180F / 0x2A19) a cada 2 min.
+3. **Fast Pair:** fones que anunciam a bateria de cada lado e do estojo (serviço 0xFE2C). Só vale para fone conectado a este PC, casado pelo nome, para que o fone de outra pessoa por perto não apareça.
+
+Tudo é só leitura: o programa não conecta, não pareia e não grava nada no aparelho.
+
+## O que não entra
+
+- Aparelhos com receptor USB próprio (Logitech Lightspeed/Unifying/Bolt, Razer, Corsair, SteelSeries): cada marca passa a bateria pelo receptor do seu jeito.
+- Aparelhos com fio.
+
+## Como ele fica na barra
+
+O programa cria uma janela filha da barra de tarefas (`Shell_TrayWnd`), desenhada com transparência (`UpdateLayeredWindow`), e encolhe a área dos botões (`ReBarWindow32`) para abrir espaço. Se o Explorer reiniciar, ele se encaixa de novo sozinho.
+
+## Requisitos
+
+Windows 10 ou 11, com Bluetooth e .NET Framework 4.x (já vem no Windows).
