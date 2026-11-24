@@ -60,7 +60,6 @@ class Aparelho
     public string Fonte;
     public DateTime Visto;
     public bool PorFaixa;       // bateria em faixas que mudam com a carga (Logitech 0x1000): mostra a pior recente
-    public DateTime PiorDesde;
     public int Menor { get { var v = Valores.Where(x => x.NaBarra && x.Nivel >= 0).Select(x => x.Nivel).ToList(); return v.Count == 0 ? -1 : v.Min(); } }
 }
 
@@ -1083,6 +1082,7 @@ class Coletor
     public string Iniciar()
     {
         if (Demo) { Postar(MontarDemo); return null; }
+        CarregarPiores();
         var erro = fp.Iniciar();
         FastPairErro = erro;
         var t = new Thread(Laco) { IsBackground = true, Name = "coletor" };
@@ -1118,22 +1118,71 @@ class Coletor
     // aparelho no receptor que cochilou e nao respondeu: fica com a ultima leitura por ate 5 min
     static Receptores.Resultado Manter(Receptores.Resultado velho, Receptores.Resultado novo)
     {
-        foreach (var a in novo.Aparelhos) { a.Visto = DateTime.Now; Pior(velho.Aparelhos.FirstOrDefault(x => x.Id == a.Id), a, DateTime.Now); }
+        bool gravar = false;
+        foreach (var a in novo.Aparelhos) { a.Visto = DateTime.Now; gravar |= Pior(piores, a, DateTime.Now); }
+        if (gravar) GravarPiores();
         foreach (var a in velho.Aparelhos)
             if (!novo.Aparelhos.Any(x => x.Id == a.Id) && (DateTime.Now - a.Visto).TotalMinutes < 5) novo.Aparelhos.Add(a);
         return novo;
     }
 
     // bateria por faixa (ex.: K270 com pilha fraca): parado diz 70%, digitando cai para 20% (a tensao cede
-    // com o radio ligado). Fica a menor leitura dos ultimos 10 min, que e a que diz quando a pilha acaba.
-    public static void Pior(Aparelho velho, Aparelho novo, DateTime agora)
+    // com o radio ligado). Fica a menor leitura das ultimas 12 h, que e a que diz quando a pilha acaba.
+    // Gravada em arquivo para valer depois de reiniciar; pilha trocada: 12 h sem a leitura baixa e vale a nova.
+    public const double JANELA_FAIXA_H = 12;
+    static readonly Dictionary<string, Tuple<int, DateTime>> piores = new Dictionary<string, Tuple<int, DateTime>>();
+    static string ArquivoPiores { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Juicebar", "faixas.txt"); } }
+
+    // devolve true se a memoria mudou (para gravar)
+    public static bool Pior(Dictionary<string, Tuple<int, DateTime>> mem, Aparelho novo, DateTime agora)
     {
-        novo.PiorDesde = agora;
-        if (!novo.PorFaixa || velho == null || !velho.PorFaixa || novo.Valores.Count == 0 || velho.Valores.Count == 0) return;
-        var vn = novo.Valores[0]; var vv = velho.Valores[0];
-        if (vn.Carregando || vv.Nivel < 0 || vn.Nivel < 0 || vv.Nivel >= vn.Nivel) return;
-        if ((agora - velho.PiorDesde).TotalMinutes >= 10) return;       // pilha trocada: depois de 10 min vale a nova
-        vn.Nivel = vv.Nivel; novo.PiorDesde = velho.PiorDesde;
+        if (!novo.PorFaixa || novo.Valores.Count == 0) return false;
+        var vn = novo.Valores[0];
+        if (vn.Nivel < 0 || vn.Carregando) return false;
+        Tuple<int, DateTime> p;
+        if (mem.TryGetValue(novo.Id, out p) && p.Item1 < vn.Nivel && (agora - p.Item2).TotalHours < JANELA_FAIXA_H)
+        {
+            vn.Nivel = p.Item1;
+            return false;
+        }
+        mem[novo.Id] = Tuple.Create(vn.Nivel, agora);        // leitura igual ou mais baixa (ou janela vencida) renova
+        return true;
+    }
+
+    public bool TemPiores { get { return piores.Count > 0; } }
+
+    // menu "Pilhas trocadas": esquece a menor leitura guardada e le os receptores na hora
+    public void ZerarPiores()
+    {
+        piores.Clear();
+        try { File.Delete(ArquivoPiores); } catch { }
+        new Thread(() =>
+        {
+            Receptores.Resultado u = null;
+            try { u = Receptores.Ler(); } catch { }
+            if (u != null) Postar(() => { usb = Manter(usb, u); Montar(); });
+        }) { IsBackground = true }.Start();
+    }
+
+    static void CarregarPiores()
+    {
+        try
+        {
+            if (!File.Exists(ArquivoPiores)) return;
+            foreach (var l in File.ReadAllLines(ArquivoPiores))
+            {
+                var c = l.Split('\t');
+                int n; long t;
+                if (c.Length == 3 && int.TryParse(c[1], out n) && long.TryParse(c[2], out t)) piores[c[0]] = Tuple.Create(n, new DateTime(t));
+            }
+        }
+        catch { }
+    }
+
+    static void GravarPiores()
+    {
+        try { File.WriteAllLines(ArquivoPiores, piores.Select(kv => kv.Key + "\t" + kv.Value.Item1 + "\t" + kv.Value.Item2.Ticks)); }
+        catch { }
     }
 
     void Postar(Action a)
@@ -1270,11 +1319,16 @@ class Widget : Form
         var auto = new ToolStripMenuItem("Iniciar com o Windows");
         auto.Click += (s, e) => { Inicio.Ligar(!Inicio.Ligado()); };
         menu.Items.Add(auto);
+        var pilhas = new ToolStripMenuItem("Troquei as pilhas (zerar menor leitura)");
+        pilhas.ToolTipText = "Aparelhos que informam a bateria por faixa (ex.: teclado Logitech K270) mostram a menor leitura das últimas 12 h. Use depois de trocar as pilhas.";
+        pilhas.Click += (s, e) => col.ZerarPiores();
+        menu.Items.Add(pilhas);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Sair", null, (s, e) => { col.Parar(); Application.Exit(); });
         menu.Opening += (s, e) =>
         {
             auto.Checked = Inicio.Ligado();
+            pilhas.Visible = col.TemPiores;
             var r = Atualizador.Disponivel;
             atualizar.Text = r == null ? "Procurar atualizações" : "Atualizar para a versão " + r.Tag.TrimStart('v');
             atualizar.Font = new Font(menu.Font, r == null ? FontStyle.Regular : FontStyle.Bold);
@@ -1907,16 +1961,20 @@ static class Testes
         Conferir("Unifying tipo 1 = teclado", Tipo.Teclado, Logi.TipoDe10(new byte[] { 0x21, 0x08, 0x14, 0x40, 0x03, 0x04, 0x00, 0x01 }[7] & 0x0F));
         Conferir("Unifying tipo 2 = mouse", Tipo.Mouse, Logi.TipoDe10(0x02));
 
-        // K270 por faixa: 20% (digitando) e depois 70% (parado) -> fica 20% por 10 min
+        // K270 por faixa: 20% (digitando) e depois 70% (parado) -> fica 20% por 12 h
         Func<int, Aparelho> k = nv => { var a = new Aparelho { Id = "k", PorFaixa = true }; a.Valores.Add(new Valor { Nivel = nv }); return a; };
+        var mem = new Dictionary<string, Tuple<int, DateTime>>();
         var t = new DateTime(2026, 11, 24, 15, 0, 0);
-        var ka = k(20); Coletor.Pior(null, ka, t);
-        var kb = k(70); Coletor.Pior(ka, kb, t.AddMinutes(1));
-        Conferir("faixa: 70 depois de 20 fica 20", 20, kb.Valores[0].Nivel);
-        var kc = k(70); Coletor.Pior(kb, kc, t.AddMinutes(11));
-        Conferir("faixa: depois de 10 min sem 20 volta 70", 70, kc.Valores[0].Nivel);
-        var kd = k(70); kd.PorFaixa = false; Coletor.Pior(ka, kd, t.AddMinutes(1));
-        Conferir("sem faixa: vale a leitura nova", 70, kd.Valores[0].Nivel);
+        Coletor.Pior(mem, k(20), t);
+        var kb = k(70); Coletor.Pior(mem, kb, t.AddHours(5));
+        Conferir("faixa: 70 cinco horas depois de 20 fica 20", 20, kb.Valores[0].Nivel);
+        var kc = k(20); Coletor.Pior(mem, kc, t.AddHours(10));
+        var kd = k(70); Coletor.Pior(mem, kd, t.AddHours(21));
+        Conferir("faixa: 20 de novo renova a janela", 20, kd.Valores[0].Nivel);
+        var ke = k(70); Coletor.Pior(mem, ke, t.AddHours(22.5));
+        Conferir("faixa: 12 h sem 20 (pilha nova) volta 70", 70, ke.Valores[0].Nivel);
+        var kf = k(70); kf.PorFaixa = false; Coletor.Pior(new Dictionary<string, Tuple<int, DateTime>> { { "k", Tuple.Create(20, t) } }, kf, t.AddHours(1));
+        Conferir("sem faixa: vale a leitura nova", 70, kf.Valores[0].Nivel);
 
         // padrao USB: valor bruto -> %
         Conferir("HID 0-255 valor 128", 50, Hid.Escala(128, 0, 255, false));
