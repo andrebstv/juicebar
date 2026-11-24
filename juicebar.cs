@@ -59,6 +59,8 @@ class Aparelho
     public List<Valor> Valores = new List<Valor>();
     public string Fonte;
     public DateTime Visto;
+    public bool PorFaixa;       // bateria em faixas que mudam com a carga (Logitech 0x1000): mostra a pior recente
+    public DateTime PiorDesde;
     public int Menor { get { var v = Valores.Where(x => x.NaBarra && x.Nivel >= 0).Select(x => x.Nivel).ToList(); return v.Count == 0 ? -1 : v.Min(); } }
 }
 
@@ -951,6 +953,7 @@ static class Receptores
                         var tipo = i.TipoLogi >= 0 ? Logi.TipoDe(i.TipoLogi) : Logi.TipoDe10(tipoR);
                         var a = new Aparelho { Id = string.Format("logi:{0}:{1}", g.Key, idx), Nome = string.IsNullOrEmpty(i.Nome) ? "Aparelho Logitech" : "Logitech " + i.Nome, Tipo = tipo, Fonte = "Logitech" };
                         if (a.Nome.StartsWith("Logitech Logitech")) a.Nome = a.Nome.Substring(9);
+                        a.PorFaixa = i.FeatureBateria == 0x1000;
                         a.Valores.Add(new Valor { Rotulo = "", Nivel = i.Nivel, Carregando = i.Carregando });
                         res.Aparelhos.Add(a); lido = true;
                     }
@@ -1115,10 +1118,22 @@ class Coletor
     // aparelho no receptor que cochilou e nao respondeu: fica com a ultima leitura por ate 5 min
     static Receptores.Resultado Manter(Receptores.Resultado velho, Receptores.Resultado novo)
     {
-        foreach (var a in novo.Aparelhos) a.Visto = DateTime.Now;
+        foreach (var a in novo.Aparelhos) { a.Visto = DateTime.Now; Pior(velho.Aparelhos.FirstOrDefault(x => x.Id == a.Id), a, DateTime.Now); }
         foreach (var a in velho.Aparelhos)
             if (!novo.Aparelhos.Any(x => x.Id == a.Id) && (DateTime.Now - a.Visto).TotalMinutes < 5) novo.Aparelhos.Add(a);
         return novo;
+    }
+
+    // bateria por faixa (ex.: K270 com pilha fraca): parado diz 70%, digitando cai para 20% (a tensao cede
+    // com o radio ligado). Fica a menor leitura dos ultimos 10 min, que e a que diz quando a pilha acaba.
+    public static void Pior(Aparelho velho, Aparelho novo, DateTime agora)
+    {
+        novo.PiorDesde = agora;
+        if (!novo.PorFaixa || velho == null || !velho.PorFaixa || novo.Valores.Count == 0 || velho.Valores.Count == 0) return;
+        var vn = novo.Valores[0]; var vv = velho.Valores[0];
+        if (vn.Carregando || vv.Nivel < 0 || vn.Nivel < 0 || vv.Nivel >= vn.Nivel) return;
+        if ((agora - velho.PiorDesde).TotalMinutes >= 10) return;       // pilha trocada: depois de 10 min vale a nova
+        vn.Nivel = vv.Nivel; novo.PiorDesde = velho.PiorDesde;
     }
 
     void Postar(Action a)
@@ -1891,6 +1906,17 @@ static class Testes
         Conferir("Unifying nome K270", "K270", Logi.NomeDoRegistro(new byte[] { 0x41, 0x04, 0x4B, 0x32, 0x37, 0x30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }));
         Conferir("Unifying tipo 1 = teclado", Tipo.Teclado, Logi.TipoDe10(new byte[] { 0x21, 0x08, 0x14, 0x40, 0x03, 0x04, 0x00, 0x01 }[7] & 0x0F));
         Conferir("Unifying tipo 2 = mouse", Tipo.Mouse, Logi.TipoDe10(0x02));
+
+        // K270 por faixa: 20% (digitando) e depois 70% (parado) -> fica 20% por 10 min
+        Func<int, Aparelho> k = nv => { var a = new Aparelho { Id = "k", PorFaixa = true }; a.Valores.Add(new Valor { Nivel = nv }); return a; };
+        var t = new DateTime(2026, 11, 24, 15, 0, 0);
+        var ka = k(20); Coletor.Pior(null, ka, t);
+        var kb = k(70); Coletor.Pior(ka, kb, t.AddMinutes(1));
+        Conferir("faixa: 70 depois de 20 fica 20", 20, kb.Valores[0].Nivel);
+        var kc = k(70); Coletor.Pior(kb, kc, t.AddMinutes(11));
+        Conferir("faixa: depois de 10 min sem 20 volta 70", 70, kc.Valores[0].Nivel);
+        var kd = k(70); kd.PorFaixa = false; Coletor.Pior(ka, kd, t.AddMinutes(1));
+        Conferir("sem faixa: vale a leitura nova", 70, kd.Valores[0].Nivel);
 
         // padrao USB: valor bruto -> %
         Conferir("HID 0-255 valor 128", 50, Hid.Escala(128, 0, 255, false));
