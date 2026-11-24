@@ -446,7 +446,12 @@ class Widget : Form
         col.Mudou += () => { Encaixar(); Desenhar(); AtualizarDica(); };
 
         menu.Items.Add("Detalhes", null, (s, e) => AbrirDetalhes());
+        var auto = new ToolStripMenuItem("Iniciar com o Windows");
+        auto.Click += (s, e) => { Inicio.Ligar(!Inicio.Ligado()); };
+        menu.Items.Add(auto);
+        menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Sair", null, (s, e) => { col.Parar(); Application.Exit(); });
+        menu.Opening += (s, e) => { auto.Checked = Inicio.Ligado(); };
         dica.InitialDelay = 300;
 
         MouseUp += (s, e) =>
@@ -664,6 +669,7 @@ class Detalhes : Form
     {
         this.col = col;
         Text = "Juicebar";
+        try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
         Font = new Font("Segoe UI", 10f);
         BackColor = Color.FromArgb(32, 32, 32);
         ForeColor = Color.White;
@@ -776,6 +782,31 @@ static class N
     [DllImport("gdi32.dll")] public static extern IntPtr SelectObject(IntPtr dc, IntPtr o);
     [DllImport("gdi32.dll")] public static extern bool DeleteObject(IntPtr o);
     [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+}
+
+// "Iniciar com o Windows": entrada Juicebar em HKCU\...\Run apontando para este .exe
+static class Inicio
+{
+    const string CHAVE = @"Software\Microsoft\Windows\CurrentVersion\Run";
+    static string Exe { get { return "\"" + Application.ExecutablePath + "\""; } }
+
+    public static bool Ligado()
+    {
+        using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(CHAVE))
+        {
+            var v = k == null ? null : k.GetValue("Juicebar") as string;
+            return v != null && string.Equals(v.Trim('"'), Application.ExecutablePath, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    public static void Ligar(bool sim)
+    {
+        using (var k = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(CHAVE))
+        {
+            if (sim) k.SetValue("Juicebar", Exe);
+            else if (k.GetValue("Juicebar") != null) k.DeleteValue("Juicebar");
+        }
+    }
 }
 
 static class Programa

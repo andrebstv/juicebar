@@ -28,7 +28,7 @@ set "R="
 for %%n in (System.Runtime System.Runtime.InteropServices.WindowsRuntime System.Threading.Tasks System.ObjectModel) do (
   for /d %%d in ("%GAC%\%%n\*") do if exist "%%d\%%n.dll" call set "R=%%R%% -r:"%%d\%%n.dll""
 )
-"%NET%\csc.exe" -nologo -codepage:65001 -nowarn:162 -target:winexe -out:"%EXE%" ^
+"%NET%\csc.exe" -nologo -codepage:65001 -nowarn:162 -target:winexe -out:"%EXE%" -win32icon:"%~dp0juicebar.ico" ^
   -r:"%WMD%\Windows.Devices.winmd" -r:"%WMD%\Windows.Foundation.winmd" -r:"%WMD%\Windows.Storage.winmd" ^
   -r:"%NET%\System.Runtime.WindowsRuntime.dll" -r:System.Windows.Forms.dll -r:System.Drawing.dll %R% "%SRC%"
 exit /b %errorlevel%

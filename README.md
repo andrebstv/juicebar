@@ -1,3 +1,5 @@
+<img src="docs/icone.png" width="96" alt="Ícone do Juicebar">
+
 # Juicebar
 
 A bateria dos seus aparelhos sem fio direto na barra de tarefas do Windows: fone, mouse, teclado, controle.
@@ -18,24 +20,18 @@ Na barra, à esquerda do clima e da área de notificação:
 - cada aparelho conectado tem o seu ícone (fone, mouse, teclado, controle) e uma pilha com a porcentagem, um ao lado do outro;
 - cores: branco acima de 40%, laranja até 40%, vermelho até 20%, verde carregando; o ícone pega a cor do nível mais baixo do aparelho;
 - passar o mouse mostra todos os aparelhos, cada lado do fone, o estojo e a hora da leitura;
-- clique esquerdo abre a janela de detalhes; clique direito tem Detalhes e Sair;
+- clique esquerdo abre a janela de detalhes; clique direito tem Detalhes, Iniciar com o Windows e Sair;
 - sem nenhum aparelho com bateria conectado, fica só um ícone de Bluetooth apagado.
 
 Para ver o visual sem aparelho nenhum: `juicebar.bat --demo` (fone, mouse e teclado de exemplo, como na imagem acima).
 
 ### Abrir com o Windows
 
-Depois de abrir uma vez pelo `.bat`, rode no PowerShell:
+Clique direito no Juicebar na barra e marque **Iniciar com o Windows**. Desmarque para tirar.
 
-```powershell
-Set-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run -Name Juicebar -Value "`"$env:LOCALAPPDATA\Juicebar\juicebar.exe`""
-```
+### Ícone
 
-Para tirar:
-
-```powershell
-Remove-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run -Name Juicebar
-```
+O `juicebar.ico` é gerado pelo `tools\gerar-icone.ps1` (cada tamanho desenhado do zero).
 
 ## De onde vem a bateria
 
