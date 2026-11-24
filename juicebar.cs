@@ -1735,6 +1735,14 @@ static class Programa
         var testar = Arg(args, "--testar");
         if (testar != null) { Environment.Exit(Testes.Rodar(testar.Length > 0 ? testar : Path.Combine(Path.GetTempPath(), "juicebar-testes.txt"))); return; }
 
+        // --atualizar-agora: procura e instala a versao nova sem perguntar (o mesmo do menu)
+        if (args.Any(a => a.Equals("--atualizar-agora", StringComparison.OrdinalIgnoreCase)))
+        {
+            string e1; var r = Atualizador.Procurar(out e1);
+            Environment.Exit(r == null ? 2 : (Atualizador.Instalar(r) == null ? 0 : 1));
+            return;
+        }
+
         // --diagnostico [arquivo]: grava o diagnostico USB/HID e sai
         var diag = Arg(args, "--diagnostico");
         if (diag != null)
