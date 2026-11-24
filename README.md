@@ -8,12 +8,22 @@ A bateria dos seus aparelhos sem fio direto na barra de tarefas do Windows: fone
 
 Fones com Fast Pair do Google (por exemplo, vários modelos da JBL) aparecem com cada lado separado, E (esquerdo) e D (direito). O Windows e a maioria dos programas só mostram um número para o fone inteiro.
 
-Não precisa instalar nada: o programa é compilado com o compilador de C# que já vem no Windows (.NET Framework 4).
+## Instalar
 
-## Como usar
+1. Baixe o `juicebar.exe` da [última versão](https://github.com/caiquebmaso/juicebar/releases/latest).
+2. Coloque num lugar fixo, por exemplo `%LOCALAPPDATA%\Juicebar`, e abra com dois cliques.
+3. Para abrir sozinho com o Windows: clique direito no Juicebar na barra e marque **Iniciar com o Windows**.
+
+O `.exe` não tem assinatura digital. Na primeira vez o Windows mostra a tela "O Windows protegeu o computador" (SmartScreen): clique em **Mais informações** e depois em **Executar assim mesmo**. Se preferir, compile você mesmo a partir do código (abaixo).
+
+Não precisa instalar nada além disso: o programa usa o .NET Framework 4, que já vem no Windows.
+
+### Compilar a partir do código
 
 1. Baixe ou clone o repositório.
-2. Clique duas vezes em `juicebar.bat`. Na primeira vez ele compila o programa em `%LOCALAPPDATA%\Juicebar` e depois abre. Se o `.cs` mudar, ele compila de novo.
+2. Clique duas vezes em `juicebar.bat`. Na primeira vez ele compila o programa em `%LOCALAPPDATA%\Juicebar` com o compilador de C# que já vem no Windows e depois abre. Se o `.cs` mudar, ele compila de novo.
+
+## Como usar
 
 Na barra, à esquerda do clima e da área de notificação:
 

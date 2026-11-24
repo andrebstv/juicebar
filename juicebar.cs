@@ -24,6 +24,14 @@ using Windows.Devices.Bluetooth.Advertisement;
 using Windows.Devices.Bluetooth.GenericAttributeProfile;
 using Windows.Storage.Streams;
 
+[assembly: System.Reflection.AssemblyTitle("Juicebar")]
+[assembly: System.Reflection.AssemblyProduct("Juicebar")]
+[assembly: System.Reflection.AssemblyDescription("Bateria dos aparelhos sem fio na barra de tarefas")]
+[assembly: System.Reflection.AssemblyCopyright("Copyright (c) 2026 caiquebmaso - MIT")]
+[assembly: System.Reflection.AssemblyVersion("1.0.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.0.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersion("1.0.0")]
+
 // ================================================================ modelo
 enum Tipo { Fone, Mouse, Teclado, Controle, Outro }
 
