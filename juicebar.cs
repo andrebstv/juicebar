@@ -311,9 +311,25 @@ static class Hid
                     else c.Pai = c.Caminho;
                     string cam = c.Caminho.ToUpperInvariant(), p = c.Pai.ToUpperInvariant();
                     c.Bluetooth = cam.Contains("{00001124") || cam.Contains("{00001812") || p.StartsWith("BTH");
+                    if (c.Bluetooth || Receptores.Travado(c.Caminho)) continue;
+                    bool aberto = false;
+                    var cc = c;
+                    if (!Receptores.ComPrazo(() => { aberto = Descrever(cc); }, 2000)) { Receptores.MarcarTravado(c.Caminho); continue; }
+                    if (aberto) r.Add(c);
+                }
+                finally { Marshal.FreeHGlobal(buf); }
+            }
+        }
+        finally { SetupDiDestroyDeviceInfoList(h); }
+        return r;
+    }
+
+    // atributos, capacidades e textos de uma colecao (pode travar em aparelho que nao responde)
+    static bool Descrever(Colecao c)
+    {
                     using (var fh = Abrir(c.Caminho, false))
                     {
-                        if (fh.IsInvalid) continue;
+                        if (fh.IsInvalid) return false;
                         var at = new HIDD_ATTRIBUTES(); at.Size = Marshal.SizeOf(typeof(HIDD_ATTRIBUTES));
                         if (HidD_GetAttributes(fh, ref at)) { c.Vid = at.VendorID; c.Pid = at.ProductID; }
                         IntPtr pp;
@@ -332,13 +348,7 @@ static class Hid
                         }
                         c.Produto = Texto(fh, true); c.Fabricante = Texto(fh, false);
                     }
-                    r.Add(c);
-                }
-                finally { Marshal.FreeHGlobal(buf); }
-            }
-        }
-        finally { SetupDiDestroyDeviceInfoList(h); }
-        return r;
+                    return true;
     }
 
     static string Texto(SafeFileHandle fh, bool produto)
@@ -512,7 +522,13 @@ class HidPP : IDisposable
         var b = new byte[usarLongo ? outLongo : outCurto];
         b[0] = (byte)(usarLongo ? 0x11 : 0x10); b[1] = idx; b[2] = feat; b[3] = (byte)((func << 4) | SW);
         Array.Copy(p, 0, b, 4, Math.Min(p.Length, b.Length - 4));
-        try { fs.Write(b, 0, b.Length); fs.Flush(); } catch { return null; }
+        try
+        {
+            var ar = fs.BeginWrite(b, 0, b.Length, null, null);
+            if (!ar.AsyncWaitHandle.WaitOne(1000)) return null;      // aparelho nao aceitou: desiste sem prender
+            fs.EndWrite(ar);
+        }
+        catch { return null; }
         var fim = DateTime.Now.AddMilliseconds(ms);
         while (true)
         {
@@ -741,8 +757,34 @@ static class Receptores
 
     public static Resultado Ler()
     {
-        lock (trava) return LerSozinho();
+        if (!Monitor.TryEnter(trava, 20000)) return new Resultado { Diagnostico = "outra leitura USB ainda está rodando\r\n" };
+        try { return LerSozinho(); }
+        finally { Monitor.Exit(trava); }
     }
+
+    // Aparelho que nao responde pode prender uma chamada do Windows para sempre. Cada aparelho
+    // roda numa linha propria com prazo; se estourar, fica 10 min sem ser perguntado.
+    public static readonly Dictionary<string, DateTime> Travados = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+
+    public static bool ComPrazo(Action a, int ms)
+    {
+        var t = new Thread(() => { try { a(); } catch { } }) { IsBackground = true, Name = "hid" };
+        t.Start();
+        return t.Join(ms);
+    }
+
+    public static bool Travado(string chave)
+    {
+        lock (Travados)
+        {
+            DateTime q;
+            if (!Travados.TryGetValue(chave, out q)) return false;
+            if ((DateTime.Now - q).TotalMinutes < 10) return true;
+            Travados.Remove(chave); return false;
+        }
+    }
+
+    public static void MarcarTravado(string chave) { lock (Travados) Travados[chave] = DateTime.Now; }
 
     static Resultado LerSozinho()
     {
@@ -750,7 +792,31 @@ static class Receptores
         var d = new System.Text.StringBuilder();
         List<Hid.Colecao> todas;
         try { todas = Hid.Listar(); } catch (Exception ex) { res.Diagnostico = "HID: erro ao listar: " + ex.Message; return res; }
+        lock (Travados) foreach (var k in Travados.Keys) d.AppendLine("travado (pulado por 10 min): " + k);
         foreach (var g in todas.Where(c => !c.Bluetooth).GroupBy(c => c.Pai, StringComparer.OrdinalIgnoreCase))
+        {
+            if (Travado(g.Key)) continue;
+            var parcial = new Resultado();
+            var dg = new System.Text.StringBuilder();
+            var grupo = g;
+            bool acabou = ComPrazo(() => LerGrupo(grupo, parcial, dg), 8000);
+            lock (dg) d.Append(dg.ToString());
+            if (!acabou)
+            {
+                MarcarTravado(g.Key);
+                d.AppendLine("   TRAVOU: não respondeu em 8 s (" + g.Key + ")");
+                continue;
+            }
+            res.Aparelhos.AddRange(parcial.Aparelhos);
+            res.SemLeitura.AddRange(parcial.SemLeitura);
+        }
+        res.Diagnostico = d.ToString();
+        return res;
+    }
+
+    static void LerGrupo(IGrouping<string, Hid.Colecao> g, Resultado res, System.Text.StringBuilder dd)
+    {
+        var d = new Linhas(dd);
         {
             var cols = g.ToList();
             var c0 = cols[0];
@@ -818,8 +884,14 @@ static class Receptores
                 d.AppendLine("   sem fio, sem leitura ainda");
             }
         }
-        res.Diagnostico = d.ToString();
-        return res;
+    }
+
+    // diagnostico escrito por uma linha que pode ser abandonada no meio
+    class Linhas
+    {
+        readonly System.Text.StringBuilder sb;
+        public Linhas(System.Text.StringBuilder sb) { this.sb = sb; }
+        public void AppendLine(string s) { lock (sb) sb.AppendLine(s); }
     }
 
     static Tipo TipoPelaColecao(List<Hid.Colecao> cols)
@@ -921,8 +993,8 @@ class Coletor
                     x.Bat = gattCache[x.EnderecoLE];
                 }
                 Receptores.Resultado u = null;
-                if (ciclo % 3 == 1)                                 // USB/2.4 GHz: a cada ~1 min
-                    try { u = Receptores.Ler(); } catch { }
+                if (ciclo % 3 == 1)                                 // USB/2.4 GHz: a cada ~1 min, nunca prende o Bluetooth
+                    Receptores.ComPrazo(() => { u = Receptores.Ler(); }, 45000);
                 Postar(() => { grupos = g; if (u != null) usb = Manter(usb, u); Montar(); });
             }
             catch { }
